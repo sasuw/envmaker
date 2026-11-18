@@ -1,0 +1,4 @@
+title = "Public tree secret gate"
+
+[extend]
+useDefault = true

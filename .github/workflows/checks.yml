@@ -1,0 +1,38 @@
+name: Public checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  gates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install check and Stow build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bash ca-certificates coreutils curl dash diffutils findutils git grep \
+            gzip hostname make mawk ncurses-bin perl python3 sed shellcheck tar zsh
+      - name: Install pinned scanner
+        run: |
+          GOBIN="$RUNNER_TEMP/tools" go install github.com/zricethezav/gitleaks/v8@v8.16.0
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+      - name: Public scan
+        run: python3 -I scripts/scan_public.py --root .
+      - name: Build Stow prerequisite in disposable runner
+        run: |
+          cd "$RUNNER_TEMP"
+          curl --fail --silent --show-error --location --output stow.tar.gz https://ftp.gnu.org/gnu/stow/stow-2.4.1.tar.gz
+          tar -xzf stow.tar.gz
+          cd stow-2.4.1
+          ./configure --prefix=/opt/stow-2.4.1
+          make
+          sudo make install
+      - name: Syntax, lint and isolated runtime tests
+        run: env -u BASH_ENV -u ENV bash scripts/check_public.sh
