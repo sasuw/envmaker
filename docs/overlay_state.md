@@ -55,9 +55,22 @@ descriptors; recovery also refuses a journaled Stow PID still reported alive
 when no exit status was recorded. PID reuse can cause a conservative refusal;
 no process is killed automatically.
 
-Legacy shell writers re-exec under the common guard. Descendants inherit its
-descriptor; each re-entry verifies flock, inode and ownership rather than
-trusting an environment flag. The parent keeps the lock until the command exits.
+Legacy shell writers re-exec under the common guard. Internal Stow and nested
+envmaker commands inherit its descriptor; each re-entry verifies flock, inode
+and ownership rather than trusting an environment flag. Inheritance is enabled
+only in the intended child after fork, preserving the parent's descriptor flags.
+The parent keeps the lock until the command exits.
+Hooks, discovery rules and fallback commands use a child-local execution boundary
+that removes `DFT_GUARD_FD` and closes the inherited lock descriptors. Shell
+callers share a Bash subshell helper, preserving shell functions, builtins and
+Bash execution of scripts without a shebang. Perl stack hooks close both the
+original handoff descriptor and any verified duplicate before exec.
+Closing a child copy never explicitly unlocks the shared
+open-file description. Synchronous external execution therefore remains protected,
+while background descendants cannot keep the lock after envmaker exits. A hook
+that invokes envmaker receives no internal lock privilege and encounters ordinary
+contention while its parent runs. Contention diagnostics mention an inherited
+background descriptor as one possible cause; no forced unlock is provided.
 The same guard protects generation application, deletion and recovery.
 Every command entry selects inheritance through `TargetGuard::for_entry`.
 Pre-dispatch detection, applied inspection and recovery therefore validate
@@ -229,6 +242,14 @@ and a hard process stop after Stow. Shared-guard tests exercise every legacy
 writer, explicit overrides and alternate state directories. A pipe-barrier lock
 fixture includes a removed-guard negative control and is repeated pinned to one
 CPU in both orders. Descriptive subtest names may be supplied to run a selection.
+External-boundary cases cross stack/legacy and nested entry with hooks, rules
+and fallback commands. FIFO readiness/release handshakes prove synchronous
+exclusion and immediate reuse while detached descendants remain alive. An old
+leak negative control retains both the original and verified descriptors. A
+separate case retains the lock in an internal mutator after its parent exits.
+These detached-process fixtures require Linux child-subreaper support for PID
+reaping and explicitly skip elsewhere; their lock assertions use independent
+writers rather than relying on descriptor-directory inspection.
 
 Migration requires an explicit originating source ID. Only exact relative
 Stow link texts for selected entries from that source qualify. A folded

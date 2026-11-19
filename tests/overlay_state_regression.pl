@@ -3,9 +3,10 @@ use strict;
 use warnings;
 use Cwd qw(abs_path getcwd);
 use File::Basename qw(dirname);
-use File::Path qw(make_path remove_tree);
-use File::Temp qw(tempdir);
+use File::Path qw(make_path);
 use JSON::PP;
+use Fcntl qw(:DEFAULT F_GETFD F_SETFD FD_CLOEXEC);
+use IO::Select;
 use POSIX ();
 use Test::More;
 use lib dirname(dirname(abs_path(__FILE__))) . '/bin';
@@ -13,20 +14,18 @@ use Dotfiletracker::OverlayPlanner;
 use Dotfiletracker::TargetGuard;
 use Dotfiletracker::OverlayState;
 
+use lib dirname(abs_path(__FILE__));
+use FixtureLifecycle;
+
 my $repo = dirname(dirname(abs_path(__FILE__)));
-my $root = tempdir('envmaker-state.XXXXXX', TMPDIR => 1, CLEANUP => 0);
+my $root = FixtureLifecycle::suite_root('envmaker-state.', $^X, abs_path(__FILE__), @ARGV);
 my $serial = 0;
 my $version = $ENV{STOW_VERSION} || '2.4.1';
 open my $binary, '<', "/opt/stow-$version/bin/stow" or die $!;
 my $shebang = <$binary>; close $binary; chomp $shebang;
 $shebang =~ s/^#!//;
 my $perl = $shebang eq '/usr/bin/env perl' ? $^X : $shebang;
-END {
-    if (defined $root) {
-        if (Test::More->builder->is_passing && -d $root && $root =~ m{/envmaker-state\.[^/]+$}) { remove_tree($root); }
-        else { print STDERR "Failed lifecycle fixtures retained: $root\n"; }
-    }
-}
+
 sub write_file {
     my ($file, $bytes) = @_;
     make_path(dirname($file));
@@ -75,6 +74,264 @@ sub case_test {
     return if @ARGV && !grep { $_ eq $name } @ARGV;
     subtest($name, $callback);
 }
+
+sub boundary_pipes {
+    my ($f) = @_;
+    make_path("$f->{base}/boundary");
+    my %pipes;
+    for my $name (qw(sync-ready sync-release background-ready background-release)) {
+        my $file = "$f->{base}/boundary/$name";
+        POSIX::mkfifo($file, 0600) == 0 or die $!;
+        sysopen($pipes{$name}, $file, O_RDWR | O_NONBLOCK) or die $!;
+    }
+    return \%pipes;
+}
+sub boundary_ready {
+    my ($fh) = @_;
+    IO::Select->new($fh)->can_read(20) or die "External fixture readiness deadline exceeded\n";
+    my $line = '';
+    while ($line !~ /\n/) {
+        sysread($fh, my $part, 4096) or die "External fixture readiness failed\n";
+        $line .= $part;
+    }
+    return $line;
+}
+sub boundary_round {
+    my ($f, $launch, $after_sync, $old_leak) = @_;
+    my $pipes = boundary_pipes($f);
+    my ($pid, $background, $reaped);
+    my $error;
+    eval {
+        $pid = fork(); defined $pid or die $!;
+        if (!$pid) {
+            local %ENV = %{$f->{env}};
+            chdir $f->{cwd} or POSIX::_exit(125);
+            open STDIN, '<', '/dev/null' or POSIX::_exit(125);
+            open STDOUT, '>', "$f->{base}/boundary/stdout" or POSIX::_exit(125);
+            open STDERR, '>', "$f->{base}/boundary/stderr" or POSIX::_exit(125);
+            $launch->();
+            POSIX::_exit(127);
+        }
+        $background = JSON::PP->new->decode(boundary_ready($pipes->{'background-ready'}));
+        boundary_ready($pipes->{'sync-ready'});
+        my $clean = !$background->{guard_env} && !@{$background->{lock_fds}};
+        diag('old leak: guard environment=', $background->{guard_env}, ', lock descriptor count=', scalar @{$background->{lock_fds}}) if $old_leak;
+        is($clean ? 1 : 0, $old_leak ? 0 : 1, 'external descendant has no guard environment or lock descriptor (old leak fails)');
+        my ($overlap, undef, $diagnostic) = run($f, $perl, "$repo/bin/mutation_guard.pl", 'run', 'legacy', '--', 'true');
+        ok(!$overlap && $diagnostic =~ /lock is held/, 'independent writer excluded throughout synchronous external execution');
+        like($diagnostic, qr/background process.*open lock descriptor/, 'contention describes inherited descriptor as a possible cause');
+        syswrite($pipes->{'sync-release'}, 'G') == 1 or die $!;
+        local $SIG{ALRM} = sub { die "External operation exit deadline exceeded\n" }; alarm 20;
+        waitpid($pid, 0) == $pid or die $!;
+        my $status = $?; $reaped = 1; alarm 0;
+        is($status, 0, 'first operation exits successfully') or diag(read_file("$f->{base}/boundary/stderr"));
+        $after_sync->();
+        is(waitpid($background->{pid}, POSIX::WNOHANG()), 0, 'background descendant is still alive and awaits release');
+        alarm 20;
+        my ($next, undef, $err) = run($f, 'bash', "$repo/envmaker.sh", '--yes', 'execstow', 'restow');
+        alarm 0;
+        is($next ? 1 : 0, $old_leak ? 0 : 1, 'immediate second writer succeeds while descendant lives (old leak fails)') or diag($err);
+        1;
+    } or $error = $@;
+    # Release/reap by captured PID on success and failure. The caller's alarm
+    # bounds command capture; no fixed sleep establishes readiness or success.
+    syswrite($pipes->{'sync-release'}, 'G');
+    syswrite($pipes->{'background-release'}, 'G');
+    local $SIG{ALRM} = sub { die "External fixture teardown deadline exceeded\n" }; alarm 50;
+    waitpid($pid, 0) if $pid && !$reaped;
+    if (!$background && -f "$f->{base}/boundary/background.pid") {
+        my $child_pid = read_file("$f->{base}/boundary/background.pid");
+        chomp $child_pid;
+        $child_pid =~ /^\d+$/ or die 'Invalid owned background PID';
+        $background = { pid => $child_pid };
+    }
+    if ($background) {
+        is(waitpid($background->{pid}, 0), $background->{pid}, 'owned background descendant reaped by PID');
+        is($?, 0, 'background descendant exits on explicit release');
+    }
+    close $_ for values %$pipes;
+    alarm 0;
+    die $error if $error;
+}
+sub enable_boundary_reaper {
+    # Linux test infrastructure only; lock release and exclusion are proved by
+    # portable flock/FIFO handshakes, without relying on /proc inspection.
+    return 0 unless $^O eq 'linux';
+    return 0 unless eval { require 'syscall.ph'; 1 };
+    return syscall(&SYS_prctl, 36, 1, 0, 0, 0) == 0; # PR_SET_CHILD_SUBREAPER
+}
+
+case_test 'external descriptor boundary across stack legacy hooks rules and fallbacks' => sub {
+    plan skip_all => 'Linux child subreaper required to reap detached fixture descendants' unless enable_boundary_reaper();
+    for my $variant ($ENV{DFT_TEST_REVERSE} ? qw(nested-legacy legacy nested-stack stack) : qw(stack nested-stack legacy nested-legacy)) {
+        my $mode = $variant;
+        my $nested = $mode =~ s/^nested-//;
+        for my $entry ($ENV{DFT_TEST_REVERSE} ? qw(fallback rule hook) : qw(hook rule fallback)) {
+            subtest "$variant $entry" => sub {
+                my $f = fixture();
+                write_file("$f->{generic}/common/pkg/.setting", 'source');
+                if ($mode eq 'legacy') {
+                    write_file("$f->{home}/.config/dotfiletracker/config", "dotfiles_dir=$f->{generic}\n");
+                }
+                my $script = $entry eq 'hook' ? "$f->{generic}/hooks/post-stow.d/10-boundary"
+                    : $entry eq 'rule' ? "$f->{generic}/rules/selected" : "$f->{base}/tools/selector";
+                make_path("$f->{generic}/parts/selected") if $entry eq 'rule';
+                make_path("$f->{generic}/parts/selector/selected") if $entry eq 'fallback';
+                $f->{env}{PATH} = "$f->{base}/tools:$f->{env}{PATH}";
+                write_file($script, <<'BASH' . "exec '$perl' '$repo/tests/overlay_state_driver.pl' external-worker\n");
+#!/usr/bin/env bash
+[[ ! ${DFT_GUARD_FD+x} ]] || exit 91
+# Inspect the shell itself before exec/CLOEXEC could hide an extra copy.
+for guard_handle in /dev/fd/*; do
+    if [[ "$guard_handle" -ef "$HOME/.dotfiletracker-lock" ]]; then exit 92; fi
+done
+BASH
+                chmod 0755, $script or die $!;
+                local $SIG{ALRM} = sub { die "External boundary round deadline exceeded\n" }; alarm 60;
+                boundary_round($f, sub {
+                    my @command = ('bash', "$repo/envmaker.sh", '--yes', 'execstow', 'restow');
+                    @command = ($perl, "$repo/bin/mutation_guard.pl", 'run', 'legacy', '--', @command) if $nested;
+                    exec { $command[0] } @command;
+                }, sub {
+                    write_file($script, "#!/bin/sh\nprintf 'selected\\n'\n");
+                }, 0);
+                alarm 0;
+            };
+        }
+    }
+};
+
+case_test 'Bash function fallbacks select OS directories in legacy and stack modes' => sub {
+    for my $mode (qw(legacy stack)) {
+        for my $nested (0, 1) {
+            my $f = fixture();
+            write_file("$f->{home}/.config/dotfiletracker/config", "dotfiles_dir=$f->{generic}\n") if $mode eq 'legacy';
+            write_file("$f->{base}/os_probe.sh", "source \"\$1/bin/common.sh\"\nostype\n");
+            my ($probed, $os) = run($f, 'bash', "$f->{base}/os_probe.sh", $repo);
+            ok($probed, 'source-local OS function is available');
+            chomp $os;
+            for my $candidate (qw(linux macos bsd solaris windows)) {
+                write_file("$f->{generic}/parts/ostype/$candidate/pkg/.os-choice", $candidate);
+            }
+            write_file("$f->{generic}/common/pkg/.shared-choice", 'shared');
+            my @prefix = $nested ? ($perl, "$repo/bin/mutation_guard.pl", 'run', 'legacy', '--') : ();
+            my ($listed, $out, $err) = run($f, @prefix, 'bash', "$repo/envmaker.sh", 'listdirs');
+            ok($listed, "$mode nested=$nested lists directories") or diag($err);
+            like($out, qr/\Q$f->{generic}\/parts\/ostype\/$os\E(?:\n|$)/, 'function output selects the OS directory');
+            my ($applied, undef, $error) = run($f, @prefix, 'bash', "$repo/envmaker.sh", '--yes', 'execstow', 'restow');
+            ok($applied, 'real guarded discovery succeeds, including the nested stack plan') or diag($error);
+            is(-f "$f->{home}/.os-choice" ? read_file("$f->{home}/.os-choice") : undef, $os, 'OS package is installed');
+            is(read_file("$f->{home}/.shared-choice"), 'shared', 'common package is also installed');
+        }
+    }
+};
+
+case_test 'shebangless rules and legacy hooks retain Bash execution' => sub {
+    for my $mode (qw(legacy stack)) {
+        for my $nested (0, 1) {
+            my $f = fixture();
+            write_file("$f->{home}/.config/dotfiletracker/config", "dotfiles_dir=$f->{generic}\n") if $mode eq 'legacy';
+            write_file("$f->{generic}/parts/selected/pkg/.bash-rule-choice", 'selected');
+            my $body = <<'BASH';
+[[ -n ${BASH_VERSION:-} && ! ${DFT_GUARD_FD+x} ]] || exit 91
+values=(bash execution)
+[[ ${values[1]} == execution ]] || exit 92
+for guard_handle in /dev/fd/*; do
+    if [[ "$guard_handle" -ef "$HOME/.dotfiletracker-lock" ]]; then exit 93; fi
+done
+BASH
+            my $rule = "$f->{generic}/rules/selected";
+            write_file($rule, $body . "printf 'rule\\n' >> \"\$HOME/bash-execution\"\n");
+            chmod 0755, $rule or die $!;
+            if ($mode eq 'legacy') {
+                my $hook = "$f->{generic}/hooks/post-stow.d/10-bash";
+                write_file($hook, $body . "printf 'hook:%s\\n' \"\$1\" >> \"\$HOME/bash-execution\"\n");
+                chmod 0755, $hook or die $!;
+            }
+            my @prefix = $nested ? ($perl, "$repo/bin/mutation_guard.pl", 'run', 'legacy', '--') : ();
+            my ($ok, undef, $err) = run($f, @prefix, 'bash', "$repo/envmaker.sh", '--yes', 'execstow', 'restow');
+            ok($ok, "$mode nested=$nested applies shebangless selection") or diag($err);
+            is(-f "$f->{home}/.bash-rule-choice" ? read_file("$f->{home}/.bash-rule-choice") : undef,
+                'selected', 'shebangless Bash rule selects its package');
+            is(-f "$f->{home}/bash-execution" ? read_file("$f->{home}/bash-execution") : undef,
+                $mode eq 'legacy' ? "rule\nhook:restow\n" : "rule\n", 'rule and legacy hook execute in Bash without guard copies');
+        }
+    }
+};
+
+case_test 'external boundary closes original and verified duplicate with old leak negative control' => sub {
+    plan skip_all => 'Linux child subreaper required to reap detached fixture descendants' unless enable_boundary_reaper();
+    for my $old_leak ($ENV{DFT_TEST_REVERSE} ? (1, 0) : (0, 1)) {
+        my $f = fixture();
+        write_file("$f->{home}/.config/dotfiletracker/config", "dotfiles_dir=$f->{generic}\n");
+        local %ENV = %{$f->{env}};
+        my @occupied;
+        for (1 .. 16) { open my $fh, '<', '/dev/null' or die $!; push @occupied, $fh; }
+        my $guard = Dotfiletracker::TargetGuard->new(mode => 'legacy');
+        cmp_ok(fileno($guard->{fh}), '>', 16, 'descriptor number is discovered, not fixed at three');
+        my $parent_flags = fcntl($guard->{fh}, F_GETFD, 0);
+        ok($parent_flags & FD_CLOEXEC, 'parent descriptor starts close-on-exec');
+        boundary_round($f, sub {
+            $ENV{DFT_GUARD_FD} = $guard->inherited_fd;
+            my $verified = Dotfiletracker::TargetGuard->for_entry(mode => 'legacy');
+            fileno($verified->{fh}) != $ENV{DFT_GUARD_FD} or die 'verification must duplicate the inherited descriptor';
+            fcntl($verified->{fh}, F_SETFD, 0) or die $!; # Recreate both inheritable copies of the old leak.
+            my @command = ($perl, "$repo/tests/overlay_state_driver.pl", 'external-worker');
+            if ($old_leak) { exec { $command[0] } @command; }
+            else { $verified->exec_external(@command); }
+        }, sub {
+            is(fcntl($guard->{fh}, F_GETFD, 0), $parent_flags, 'child inheritance leaves exact parent flags intact');
+            $guard->finish;
+        }, $old_leak);
+    }
+};
+
+case_test 'internal mutator retains inherited lock after its guarding parent exits' => sub {
+    plan skip_all => 'Linux child subreaper required to reap detached fixture descendants' unless enable_boundary_reaper();
+    my $f = fixture();
+    my $pipes = boundary_pipes($f);
+    my $pid = fork(); defined $pid or die $!;
+    if (!$pid) {
+        local %ENV = %{$f->{env}};
+        open STDIN, '<', '/dev/null' or POSIX::_exit(125);
+        open STDOUT, '>', '/dev/null' or POSIX::_exit(125);
+        open STDERR, '>', '/dev/null' or POSIX::_exit(125);
+        exec $perl, "$repo/bin/mutation_guard.pl", 'run', 'legacy', '--',
+            $perl, "$repo/tests/overlay_state_driver.pl", 'internal-worker' or POSIX::_exit(127);
+    }
+    my ($worker, $error, $reaped);
+    eval {
+        $worker = JSON::PP->new->decode(boundary_ready($pipes->{'background-ready'}));
+        ok($worker->{guard_env}, 'internal mutator receives the explicit guard handoff');
+        kill 'TERM', $pid;
+        local $SIG{ALRM} = sub { die "Guard parent exit deadline exceeded\n" }; alarm 20;
+        waitpid($pid, 0) == $pid or die $!;
+        $reaped = 1;
+        is($? & 127, POSIX::SIGTERM(), 'owned guarding parent exits on its captured PID');
+        my ($overlap, undef, $err) = run($f, $perl, "$repo/bin/mutation_guard.pl", 'run', 'legacy', '--', 'true');
+        ok(!$overlap && $err =~ /lock is held/, 'actual internal child keeps exclusion after parent exit');
+        alarm 0;
+        1;
+    } or $error = $@;
+    syswrite($pipes->{'background-release'}, 'G');
+    local $SIG{ALRM} = sub { die "Internal fixture teardown deadline exceeded\n" }; alarm 50;
+    waitpid($pid, 0) unless $reaped;
+    if (!$worker && -f "$f->{base}/boundary/background.pid") {
+        my $child_pid = read_file("$f->{base}/boundary/background.pid");
+        chomp $child_pid;
+        $child_pid =~ /^\d+$/ or die 'Invalid owned internal PID';
+        $worker = { pid => $child_pid };
+    }
+    if ($worker) {
+        is(waitpid($worker->{pid}, 0), $worker->{pid}, 'owned internal mutator reaped by PID');
+        is($?, 0, 'internal mutator completes on explicit release');
+    }
+    close $_ for values %$pipes;
+    alarm 0;
+    die $error if $error;
+    my ($released) = run($f, $perl, "$repo/bin/mutation_guard.pl", 'run', 'legacy', '--', 'true');
+    ok($released, 'lock releases when the actual mutator exits');
+};
 
 sub local_targets_fixture {
     my ($inside_home) = @_;

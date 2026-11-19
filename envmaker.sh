@@ -949,7 +949,7 @@ function run_post_stow_hooks(){
 	for hook in "$hooks_dir"/*; do
 		[[ -f "$hook" && -x "$hook" ]] || continue
 		hook_status=0
-		DOTFILES_DIR="$dotfile_dir" "$hook" "$stowcmd" || hook_status=$?
+		DOTFILES_DIR="$dotfile_dir" dft_run_external "$hook" "$stowcmd" || hook_status=$?
 		if [[ $hook_status -ne 0 ]]; then
 			echo "Warning: post-stow hook ${hook##*/} reported a problem (exit ${hook_status})." >&2
 		fi

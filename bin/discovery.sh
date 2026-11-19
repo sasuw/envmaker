@@ -15,7 +15,7 @@ check_and_execute_rule() {
         debugEcho "We found a rule with name $rule_name, let's execute the rule script."
 
         # Execute the script
-        if "$file_path" >/dev/null; then
+        if dft_run_external "$file_path" >/dev/null; then
             debugEcho "Rule script executed successfully with return value 0."
             if verbose_enabled; then
                 echo "Rule $rule_name active"
@@ -71,7 +71,7 @@ find_matching_directories() {
             debugEcho "Directory ${dir_name} is not rule-based."
             if command -v "$dir_name" >/dev/null 2>&1; then
                 set +e
-                cmd_result=$("$dir_name" 2>/dev/null)
+                cmd_result=$(dft_run_external "$dir_name" 2>/dev/null)
                 set -e
             else
                 cmd_result=""

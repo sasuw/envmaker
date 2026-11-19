@@ -5,8 +5,7 @@ use Cwd qw(abs_path getcwd);
 use Encode qw(decode FB_CROAK);
 use File::Basename qw(dirname);
 use File::Find;
-use File::Path qw(make_path remove_tree);
-use File::Temp qw(tempdir);
+use File::Path qw(make_path);
 use IO::Select;
 use IPC::Open3;
 use JSON::PP;
@@ -16,14 +15,13 @@ use Test::More;
 use lib dirname(dirname(abs_path(__FILE__))) . '/bin';
 use Dotfiletracker::OverlayPlanner qw(build_plan);
 
+use lib dirname(abs_path(__FILE__));
+use FixtureLifecycle;
+
 my $repo = dirname(dirname(abs_path(__FILE__)));
-my $suite = tempdir('envmaker-planner.XXXXXX', TMPDIR => 1, CLEANUP => 0);
+my $suite = FixtureLifecycle::suite_root('envmaker-planner.', $^X, abs_path(__FILE__), @ARGV);
 my $serial = 0;
-END {
-    if (Test::More->builder->is_passing && -d $suite && $suite =~ m{/envmaker-planner\.[^/]+$}) {
-        remove_tree($suite);
-    } else { print STDERR "Failed planner fixtures retained: $suite\n"; }
-}
+
 sub text { my $bytes = $_[0]; return decode('UTF-8', $bytes, FB_CROAK); }
 sub write_file {
     my ($file, $bytes) = @_;

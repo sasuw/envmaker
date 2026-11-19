@@ -14,6 +14,43 @@ defined $home && $home =~ m{/envmaker-state\.[^/]+/\d+/home$} && -f "$home/.over
     or die "Refusing lifecycle driver outside an owned temporary test home\n";
 my $repo = dirname(dirname(abs_path(__FILE__)));
 my ($action, $failure) = @ARGV;
+if ($action && $action =~ /^(?:external|internal)-worker$/) {
+    # A real hook/rule/fallback starts a detached child. The lifecycle test is
+    # its subreaper; FIFOs prove readiness and control both process lifetimes.
+    local $SIG{ALRM} = sub { POSIX::_exit(124) }; alarm 45;
+    my $base = "$home/../boundary";
+    my $pid = $action eq 'external-worker' ? fork() : 0; defined $pid or die $!;
+    if (!$pid) {
+        alarm 45;
+        open STDIN, '<', '/dev/null' or die $!;
+        open STDOUT, '>', '/dev/null' or die $!;
+        open STDERR, '>', '/dev/null' or die $!;
+        open my $pid_file, '>', "$base/background.pid" or die $!;
+        print {$pid_file} "$$\n"; close $pid_file;
+        my @lock = stat "$home/.dotfiletracker-lock";
+        my @fds;
+        if (opendir my $dh, '/dev/fd') {
+            for my $fd (grep { /^\d+$/ } readdir $dh) {
+                my @actual = POSIX::fstat($fd);
+                push @fds, 0 + $fd if @actual && @lock && $actual[0] == $lock[0] && $actual[1] == $lock[1];
+            }
+            closedir $dh;
+        }
+        open my $release, '<', "$base/background-release" or die $!;
+        open my $ready, '>', "$base/background-ready" or die $!;
+        print {$ready} JSON::PP->new->encode({ pid => $$, guard_env => exists $ENV{DFT_GUARD_FD} ? 1 : 0,
+            lock_fds => \@fds }), "\n";
+        close $ready;
+        read($release, my $go, 1) == 1 or POSIX::_exit(125);
+        POSIX::_exit(0);
+    }
+    open my $release, '<', "$base/sync-release" or die $!;
+    open my $ready, '>', "$base/sync-ready" or die $!;
+    print {$ready} "R\n"; close $ready;
+    read($release, my $go, 1) == 1 or POSIX::_exit(125);
+    print "selected\n"; # Discovery fallback output, harmless for hooks/rules.
+    POSIX::_exit(0);
+}
 if ($action && $action eq 'completion') {
     shift @ARGV;
     open STDIN, '<', "$home/completion-input" or die $!;

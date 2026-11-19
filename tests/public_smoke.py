@@ -1,9 +1,13 @@
 """Isolated README/prerequisite smoke; never install tools or use real HOME."""
 
 import os
+import sys
 from pathlib import Path
 import subprocess
-import tempfile
+sys.dont_write_bytecode = True
+# Resolve this trusted sibling explicitly, including under Python isolated mode.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fixture_lifecycle import Fixture, suite_root
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class PublicSmoke(unittest.TestCase):
     def test_readme_prerequisite_legacy_migration_and_stack(self):
-        with tempfile.TemporaryDirectory(prefix="envmaker-public-smoke.") as scratch:
+        with Fixture(prefix="envmaker-public-smoke.") as scratch:
             base = Path(scratch)
             home = base / "home"
             home.mkdir()
@@ -73,4 +77,5 @@ class PublicSmoke(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    suite_root("envmaker-python-suite.")
     unittest.main()

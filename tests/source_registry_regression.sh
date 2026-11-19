@@ -2,16 +2,9 @@
 set -euo pipefail
 
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/envmaker-sources.XXXXXX")
-cleanup() {
-    local result=$?
-    if [[ $result -eq 0 && -d "$TEST_ROOT" && "$TEST_ROOT" == */envmaker-sources.* ]]; then
-        rm -rf "${TEST_ROOT:?}"
-    else
-        printf 'Failed fixtures retained: %s\n' "$TEST_ROOT" >&2
-    fi
-}
-trap cleanup EXIT
+# shellcheck source=tests/fixture_lifecycle.sh
+source "$REPO_ROOT/tests/fixture_lifecycle.sh"
+fixture_suite envmaker-sources. "$@"
 
 # shellcheck source=bin/source_registry.sh
 source "$REPO_ROOT/bin/source_registry.sh"

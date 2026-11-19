@@ -7,8 +7,9 @@ REPO_ROOT="$(
     pwd -P
 )"
 ADD_COMPLETION_SH="${REPO_ROOT}/util/add-zsh-completion.sh"
-TEST_ROOT=$(mktemp -d)
-trap 'rm -rf "$TEST_ROOT"' EXIT
+# shellcheck source=tests/fixture_lifecycle.sh
+source "$REPO_ROOT/tests/fixture_lifecycle.sh"
+fixture_suite add-completion. "$@"
 export HOME="$TEST_ROOT/home"
 export XDG_CONFIG_HOME="$HOME/.config" XDG_STATE_HOME="$HOME/.local/state"
 export XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"

@@ -310,10 +310,10 @@ sub _transition {
     $record->{command} = [map { u($_) } @command];
     print STDERR 'Stow transition: ', json()->encode($record->{command}), "\n" if $self->{verbose};
     pipe(my $go_read, my $go_write) or fail('Cannot create Stow launch barrier');
-    $self->{guard}->inherited_fd;
     my $pid = fork();
     defined $pid or fail('Cannot fork Stow transition');
     if (!$pid) {
+        $ENV{DFT_GUARD_FD} = $self->{guard}->inherited_fd;
         close $go_write;
         read($go_read, my $go, 1) == 1 or POSIX::_exit(125);
         close $go_read;
@@ -378,7 +378,6 @@ sub _hooks {
             next unless -f $hook && -x $hook;
             local $ENV{DOTFILES_DIR} = b($source->{root});
             local $ENV{DOTFILETRACKER_SOURCE_ID} = b($source->{id});
-            local $ENV{DFT_GUARD_FD};
             # Keep hook output off the command's JSON stdout, and keep the
             # target lock held until all synchronous hooks have returned.
             my $pid = fork();
@@ -386,7 +385,7 @@ sub _hooks {
             if (!$pid) {
                 open STDIN, '<', '/dev/null' or POSIX::_exit(125);
                 open STDOUT, '>&', \*STDERR or POSIX::_exit(125);
-                exec($hook, $command) or POSIX::_exit(127);
+                $self->{guard}->exec_external($hook, $command);
             }
             waitpid($pid, 0);
             warn "Warning: post-stow hook $source->{id}:$name reported a problem (wait status $?).\n" if $?;

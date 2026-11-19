@@ -3,12 +3,13 @@ use strict;
 use warnings;
 use Cwd qw(abs_path);
 use Encode qw(encode decode FB_CROAK);
-use Fcntl qw(:DEFAULT :flock :mode F_SETFD);
+use Fcntl qw(:DEFAULT :flock :mode F_GETFD F_SETFD FD_CLOEXEC);
 use File::Basename qw(dirname);
 use File::Spec;
 use File::Temp qw(tempfile);
 use IO::Handle;
 use JSON::PP;
+use POSIX ();
 
 sub fail { die "dotfiletracker: $_[0]\n"; }
 sub bytes { return encode('UTF-8', $_[0]); }
@@ -99,6 +100,7 @@ sub new {
         my $fd = $ENV{DFT_GUARD_FD};
         defined $fd && $fd =~ /^\d+$/ or fail('Missing inherited target lock');
         open $self->{fh}, '+<&', $fd or fail('Invalid inherited target lock descriptor');
+        $self->{inherited_fd} = $fd;
     } else {
         if ((!-e $self->{path} && !-l $self->{path}) && (-e $self->{owner_path} || -l $self->{owner_path})) {
             fail('Target lock is missing while its ownership record remains; restore the reserved lock inode');
@@ -123,7 +125,11 @@ sub new {
     # An inherited writer descriptor shares its open-file description with the
     # parent. Verification must never downgrade that parent's exclusive flock.
     flock($self->{fh}, ($readonly && !$args{inherit} ? LOCK_SH : LOCK_EX) | LOCK_NB)
-        or fail("Target lock is held by another operation: $self->{path}");
+        or fail("Target lock is held by another operation: $self->{path}; a background process may have inherited an open lock descriptor");
+    # Verified duplicates and newly opened handles stay private by default.
+    my $flags = fcntl($self->{fh}, F_GETFD, 0);
+    defined $flags && fcntl($self->{fh}, F_SETFD, $flags | FD_CLOEXEC)
+        or fail('Cannot protect target lock descriptor');
     $self->{record} = read_json($self->{owner_path}) || {};
     if ($self->{record}{target}) {
         $self->{record}{target} eq text($home) or fail('Target lock belongs to another home');
@@ -160,8 +166,37 @@ sub published {
 }
 sub inherited_fd {
     my ($self) = @_;
-    fcntl($self->{fh}, F_SETFD, 0) or fail('Cannot inherit target lock');
+    # Call only in the intended internal child, after fork. Never change the
+    # parent's flags just to launch Stow or a nested guarded command.
+    # Forward one verified handle, not an accumulating chain of originals.
+    # This is child-local for the same reason as clearing CLOEXEC below.
+    if (defined $self->{inherited_fd} && $self->{inherited_fd} != fileno($self->{fh})) {
+        POSIX::close(delete $self->{inherited_fd}) == 0 or fail('Cannot close original target lock handoff');
+    }
+    my $flags = fcntl($self->{fh}, F_GETFD, 0);
+    defined $flags && fcntl($self->{fh}, F_SETFD, $flags & ~FD_CLOEXEC)
+        or fail('Cannot inherit target lock');
     return fileno($self->{fh});
+}
+sub exec_external {
+    my ($self, @command) = @_;
+    # Perl stack hooks use this boundary; shell discovery/hooks close their
+    # handoff in dft_run_external so Bash keeps command lookup and ENOEXEC.
+    # Close both the verified duplicate and the original internal handoff, if
+    # present. Never LOCK_UN: these copies share the parent's open description.
+    my $fd = delete $ENV{DFT_GUARD_FD};
+    my $own_fd = ref($self) && $self->{fh} ? fileno($self->{fh}) : undef;
+    if (defined $own_fd) {
+        close $self->{fh} or fail('Cannot close external target lock copy');
+        delete $self->{fh};
+    }
+    if (defined $fd && (!defined $own_fd || $fd ne $own_fd)) {
+        $fd =~ /^\d+$/ && POSIX::close($fd) == 0
+            or fail('Cannot close inherited external target lock copy');
+    }
+    exec { $command[0] } @command;
+    warn "Cannot execute external command: $!\n";
+    POSIX::_exit(127);
 }
 sub finish {
     my ($self) = @_;

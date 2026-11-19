@@ -1,6 +1,20 @@
 # shellcheck shell=bash
 # Re-exec once under the common target guard; the inherited descriptor is
 # verified with flock/inode/ownership checks, never trusted as an env bypass.
+dft_run_external() (
+    # Keep Bash command lookup and its ENOEXEC fallback for scripts without a
+    # shebang. Only the inherited handoff reaches this shell: verification's
+    # duplicate belongs to a separate Perl process. Close without LOCK_UN, in
+    # this child only, so the caller retains its lock during synchronous work.
+    case ${DFT_GUARD_FD:-} in
+        '') ;;
+        *[!0-9]*) printf 'Invalid inherited target lock descriptor\n' >&2; return 1 ;;
+        *) eval "exec ${DFT_GUARD_FD}>&-" || return 1 ;;
+    esac
+    unset DFT_GUARD_FD
+    "$@"
+)
+
 dft_guard_legacy_entry() {
     local preview="$1" program="$2" helper_dir guard_mode=legacy
     local root guard_args=()

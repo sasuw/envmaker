@@ -4,8 +4,10 @@ set -euo pipefail
 
 REPO_ROOT="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 ENVMAKER_SH="$REPO_ROOT/envmaker.sh"
-# Keep fixtures for inspection; never remove an input repository on failure.
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/envmaker-init.XXXXXX")
+# Passing runs release fixtures; failures retain the suite root for inspection.
+# shellcheck source=tests/fixture_lifecycle.sh
+source "$REPO_ROOT/tests/fixture_lifecycle.sh"
+fixture_suite envmaker-init. "$@"
 export HOME="$TEST_ROOT/home"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_STATE_HOME="$HOME/.local/state" XDG_DATA_HOME="$HOME/.local/share"
@@ -144,4 +146,4 @@ test_init_dry_run_paths_and_help
 test_init_rejects_invalid_and_occupied_destinations
 test_init_reports_git_failure
 
-printf 'init repository regression tests passed (fixtures: %s)\n' "$TEST_ROOT"
+printf 'init repository regression tests passed\n'

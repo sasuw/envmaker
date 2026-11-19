@@ -7,8 +7,10 @@ REPO_ROOT="$(
     pwd -P
 )"
 ENVMAKER_SH="${REPO_ROOT}/envmaker.sh"
-REGRESSION_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/envmaker-legacy.XXXXXX")
-trap 'rm -rf "${REGRESSION_ROOT:?}"' EXIT
+# shellcheck source=tests/fixture_lifecycle.sh
+source "$REPO_ROOT/tests/fixture_lifecycle.sh"
+fixture_suite envmaker-legacy. "$@"
+REGRESSION_ROOT=$TEST_ROOT
 export HOME="$REGRESSION_ROOT/home"
 export XDG_CONFIG_HOME="$HOME/.config" XDG_STATE_HOME="$HOME/.local/state"
 export XDG_DATA_HOME="$HOME/.local/share" XDG_CACHE_HOME="$HOME/.cache"
@@ -57,8 +59,7 @@ test_debug_does_not_imply_dry_run() {
     local dotfiles_dir
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -83,13 +84,13 @@ test_config_file_sets_dotfiles_directory() {
     local dotfiles_dir
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${test_home}/dotfiles"
     mkdir -p "${dotfiles_dir}/parts" "${dotfiles_dir}/common"
     mkdir -p "${test_home}/.config/dotfiletracker"
+    # shellcheck disable=SC2016 # The config expands HOME when read.
     printf '%s\n' 'dotfiles_dir="$HOME/dotfiles"' > "${test_home}/.config/dotfiletracker/config"
 
     output="$(
@@ -104,8 +105,7 @@ test_dotfiles_directory_argument_is_required_without_config() {
     local test_home
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     mkdir -p "$test_home"
@@ -125,8 +125,7 @@ test_dotfiles_directory_argument_sets_dotfiles_directory() {
     local dotfiles_dir
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/argument-dotfiles"
@@ -146,8 +145,7 @@ test_backup_scan_recursively_checks_nested_package_files() {
     local helper_source
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     workdir="${tmpdir}/packages"
@@ -176,7 +174,7 @@ cd "$WORKDIR"
 
 top_output_file="$(mktemp)"
 nested_output_file="$(mktemp)"
-trap 'rm -f "$top_output_file" "$nested_output_file"' EXIT
+# Output files belong to the enclosing suite root.
 
 BACKUP_CONFLICTS_FOUND=0
 backup_conflicting_targets_for_package shellpkg > "$top_output_file"
@@ -243,8 +241,7 @@ test_restow_preserves_files_reached_through_folded_directory_symlinks() {
     local stow_bin
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -312,8 +309,7 @@ test_restow_unfolds_directory_symlink_owned_by_another_part() {
     local stow_bin
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -367,8 +363,7 @@ test_restow_does_not_fold_new_directories() {
     local test_home
     local dotfiles_dir
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -391,8 +386,7 @@ test_non_interactive_without_yes_aborts_with_error() {
     local dotfiles_dir
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -419,8 +413,7 @@ test_non_interactive_with_yes_and_batch_flags() {
     local flag
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -448,8 +441,7 @@ test_restow_reports_only_changes() {
     local dotfiles_dir
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -481,8 +473,7 @@ test_verbose_flag_restores_full_output() {
     local dotfiles_dir
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -516,8 +507,7 @@ test_stow_reports_linked_files_in_normal_mode() {
     local dotfiles_dir
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -538,8 +528,7 @@ test_restow_reports_no_changes_for_synced_tree() {
     local dotfiles_dir
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -565,8 +554,7 @@ test_delete_reports_unlinked_files() {
     local dotfiles_dir
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -594,8 +582,7 @@ test_report_link_changes_flags_unlink_outside_delete_and_detects_relink() {
     local after_file
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     helper_source="${tmpdir}/report_link_changes.sh"
     before_file="${tmpdir}/before"
@@ -642,8 +629,7 @@ test_restow_never_prompts_for_confirmation() {
     local dotfiles_dir
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -692,8 +678,7 @@ test_confirm_continue_helper_directly() {
 test_post_stow_hooks_run_after_real_stow_only() {
     local tmpdir test_home dotfiles_dir hooks_dir marker output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -705,6 +690,7 @@ test_post_stow_hooks_run_after_real_stow_only() {
 
     {
         printf '#!/usr/bin/env bash\n'
+        # shellcheck disable=SC2016 # Generate literal variables for the hook.
         printf 'printf "%%s %%s\\n" "$1" "$DOTFILES_DIR" >> "%s"\n' "$marker"
         printf 'echo "hook says hello"\n'
     } > "${hooks_dir}/10-probe"
@@ -734,8 +720,7 @@ test_post_stow_hooks_run_after_real_stow_only() {
 test_failing_post_stow_hook_warns_but_preserves_stow_status() {
     local tmpdir test_home dotfiles_dir hooks_dir output status
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -767,8 +752,7 @@ test_del_non_interactive_without_and_with_yes() {
     local target_link
     local output
 
-    tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+    tmpdir="$(mktemp -d "$TMPDIR/case.XXXXXX")"
 
     test_home="${tmpdir}/home"
     dotfiles_dir="${tmpdir}/dotfiles"
@@ -851,5 +835,7 @@ bash "${REPO_ROOT}/tests/init_repo_regression.sh"
 bash "${REPO_ROOT}/tests/add_zsh_completion_regression.sh"
 bash "${REPO_ROOT}/tests/remove_function_keyword_regression.sh"
 bash "${REPO_ROOT}/tests/convert_aliases_to_functions_regression.sh"
+
+python3 -B "${REPO_ROOT}/tests/fixture_lifecycle_test.py"
 
 echo "envmaker regression tests passed"
