@@ -198,14 +198,32 @@ sub _generation_entries {
     };
     $scan->(''); undef $scan;
 }
+sub _manifest_parents {
+    my ($manifest) = @_;
+    my %parents;
+    for my $entry (@{$manifest->{targets}}) {
+        $parents{''} = 1;
+        my $path = dirname(normalized($entry->{target}));
+        while ($path ne '.' && !$parents{u($path)}) {
+            $parents{u($path)} = 1;
+            $path = dirname($path);
+        }
+    }
+    return \%parents;
+}
 sub _check_targets {
     my ($self, $old, $new, $old_manifest, $new_manifest, $recovery) = @_;
     my (%old_entries, %new_entries, %parents);
     for my $entry (@{$old_manifest->{targets}}) { $old_entries{$entry->{target}} = $entry; }
     for my $entry (@{$new_manifest->{targets}}) { $new_entries{$entry->{target}} = $entry; }
+    # Older receipts can include directories from targets removed by the
+    # preceding operation. Only active ancestors constrain the next operation.
+    my $old_parents = _manifest_parents($old_manifest);
+    my $old_identities = $old->{ancestors} || {};
+    my %expected = (map({ $_ => $old_identities->{$_} } grep { $old_parents->{$_} } keys %$old_identities),
+        %{$self->{pending}{parents_before} || {}});
     for my $name (sort keys %{{ %old_entries, %new_entries }}) {
         my $target = normalized($name);
-        my %expected = (%{$old->{ancestors} || {}}, %{$self->{pending}{parents_before} || {}});
         my $found = $self->_parents($target, \%expected);
         @parents{keys %$found} = values %$found;
         my $path = "$self->{home}/$target";
@@ -351,7 +369,9 @@ sub _verify {
         next if $wanted{$entry->{target}};
         !exists_entry("$self->{home}/" . normalized($entry->{target})) or fail('Obsolete target link remains');
     }
-    $new->{ancestors} = $self->_check_targets($old, $new, $old_manifest, $new_manifest, 1);
+    my $verified = $self->_check_targets($old, $new, $old_manifest, $new_manifest, 1);
+    my $owned = _manifest_parents($new_manifest);
+    $new->{ancestors} = { map { $_ => $verified->{$_} } grep { $owned->{$_} } keys %$verified };
 }
 sub _publish {
     my ($self, $receipt, $keep_lock) = @_;

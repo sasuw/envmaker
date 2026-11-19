@@ -161,6 +161,11 @@ link no-op; changes only to shadowed candidates do not rebuild it. Empty
 effective plans remove old owned links without inventing an empty generation.
 Deletion uses the retained applied manifest, works with unavailable checkouts,
 and leaves an empty applied receipt. Old/new generations and logs are retained.
+A receipt records the directory identities of its active targets. After deleting
+a generation, those identities are released so another migration can unfold a
+restored legacy link. Older receipts may contain identities for retired targets.
+Active target ancestors and directories recorded by a pending operation are still
+checked.
 
 ## Recovery commands
 

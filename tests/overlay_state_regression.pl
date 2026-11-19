@@ -405,6 +405,44 @@ case_test 'direct and folded local migration recognizes Stow text with neighbori
     }
 };
 
+case_test 'migrate again after deletion and restoration of a legacy fold' => sub {
+    for my $old_receipt (0, 1) {
+        my $f = fixture();
+        my $fold = "$f->{home}/.tool";
+        my $entry = "$fold/config";
+        write_file("$f->{generic}/common/pkg/.tool/config", 'generic');
+        write_file("$f->{personal}/common/pkg/.tool/config", 'personal');
+        my @legacy = ("/opt/stow-$version/bin/stow", '--dir', "$f->{generic}/common",
+            '--target', $f->{home}, 'pkg');
+        my @envmaker = ('bash', "$repo/envmaker.sh");
+        my ($installed) = run($f, @legacy);
+        ok($installed && -l $fold, 'legacy package initially folded');
+        my $fold_text = readlink($fold);
+        my ($first, undef, $first_err) = run($f, @envmaker, '--yes', 'migrate', '--from', 'generic');
+        ok($first, 'first migration succeeds') or diag($first_err);
+        is(read_file($entry), 'personal', 'first migration installs higher owner');
+        my $prior = receipt($f);
+        my ($deleted, undef, $delete_err) = run($f, @envmaker, '--yes', 'del');
+        ok($deleted, 'recorded generation deletion succeeds') or diag($delete_err);
+        my $empty = receipt($f);
+        if ($old_receipt) {
+            $empty->{ancestors} = $prior->{ancestors};
+            write_file("$f->{state}/applied.json", JSON::PP->new->utf8->encode($empty));
+        } else {
+            is_deeply($empty->{ancestors}, {}, 'empty receipt owns no ancestors');
+        }
+        if (-d $fold) {
+            rename($fold, "$f->{base}/held former ancestor") or die $!;
+        }
+        symlink($fold_text, $fold) or die $!;
+        my ($second, undef, $second_err) = run($f, @envmaker, '--yes', 'migrate', '--from', 'generic');
+        ok($second, 'migration succeeds after exact legacy fold restoration') or diag($second_err);
+        my ($listed, $out) = run($f, @envmaker, 'ls');
+        my @targets = $listed ? @{JSON::PP->new->utf8->decode($out)->{targets}} : ();
+        ok($listed && @targets == 1 && $targets[0]{owned}, 'ls records renewed ownership');
+    }
+};
+
 case_test 'recover old shortest-path receipts after real Stow installed local targets' => sub {
     for my $operation (qw(apply migrate-direct migrate-folded)) {
         for my $action (qw(resume restore)) {
