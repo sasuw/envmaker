@@ -61,10 +61,21 @@ Rules run once per source discovery, in the caller's working directory, with
 `DOTFILES_DIR` set to the physical source root and `DOTFILETRACKER_SOURCE_ID`
 set to its ID. A successful executable rule selects its source's part; any
 nonzero result makes that part inactive. A non-executable regular rule is also
-inactive. A missing or non-regular rule uses the existing command fallback.
+inactive. A missing or non-regular rule uses the built-in fallback, which
+knows only three part names:
+
+- `parts/hostname/<host>` is selected by the output of the `hostname` command;
+- `parts/ostype/<os>` is selected by the output of the built-in `ostype` function;
+- `parts/application/<command>` is selected when `command -v <command>`
+  finds the command; neither `application` nor `<command>` is executed.
+
+A `<value>*OR*` or `*OR*<value>` sibling is selected with the value's own
+directory. An empty or failed value, `.`, `..`, or a value with `/`, a newline
+or a glob character selects nothing. Every other part without a regular rule is
+inactive: discovery never executes its name and never scans its subdirectories.
 One source's inactive rule never disables a part in another source.
 
-Rules and fallback commands are trusted executable inputs. They can have side
+Rules and the `hostname` selector are trusted executable inputs. They can have side
 effects even during inspection or dry-run; the wrapper does not sandbox them.
 Apply and migration discover under the shared target lock. Recorded-generation
 inspection, deletion and recovery bypass source parsing/discovery when the target

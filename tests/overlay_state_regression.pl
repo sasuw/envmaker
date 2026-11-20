@@ -173,13 +173,14 @@ case_test 'external descriptor boundary across stack legacy hooks rules and fall
                 if ($mode eq 'legacy') {
                     write_file("$f->{home}/.config/dotfiletracker/config", "dotfiles_dir=$f->{generic}\n");
                 }
+                # The fallback entry is the built-in hostname selector, the
+                # only ruleless part name discovery executes.
                 my $script = $entry eq 'hook' ? "$f->{generic}/hooks/post-stow.d/10-boundary"
-                    : $entry eq 'rule' ? "$f->{generic}/rules/selected" : "$f->{base}/tools/selector";
+                    : $entry eq 'rule' ? "$f->{generic}/rules/selected" : "$f->{base}/tools/hostname";
                 make_path("$f->{generic}/parts/selected") if $entry eq 'rule';
-                make_path("$f->{generic}/parts/selector/selected") if $entry eq 'fallback';
+                make_path("$f->{generic}/parts/hostname/selected") if $entry eq 'fallback';
                 $f->{env}{PATH} = "$f->{base}/tools:$f->{env}{PATH}";
-                write_file($script, <<'BASH' . "exec '$perl' '$repo/tests/overlay_state_driver.pl' external-worker\n");
-#!/usr/bin/env bash
+                write_file($script, "#!/usr/bin/env bash\n" . <<'BASH' . "exec '$perl' '$repo/tests/overlay_state_driver.pl' external-worker\n");
 [[ ! ${DFT_GUARD_FD+x} ]] || exit 91
 # Inspect the shell itself before exec/CLOEXEC could hide an extra copy.
 for guard_handle in /dev/fd/*; do
@@ -197,6 +198,39 @@ BASH
                 }, 0);
                 alarm 0;
             };
+        }
+    }
+};
+
+case_test 'ruleless parts never execute their name in legacy and stack modes' => sub {
+    # Only hostname and ostype run a built-in selector;
+    # application checks children with command -v; every other part is inactive.
+    for my $mode (qw(legacy stack)) {
+        for my $nested (0, 1) {
+            my $f = fixture();
+            write_file("$f->{home}/.config/dotfiletracker/config", "dotfiles_dir=$f->{generic}\n") if $mode eq 'legacy';
+            my $log = "$f->{base}/tripwire.log";
+            for my $name (qw(selector application demoapp)) {
+                write_file("$f->{base}/tools/$name", "#!/bin/sh\nprintf '%s\\n' '$name' >> '$log'\nprintf 'selected\\n'\n");
+                chmod 0755, "$f->{base}/tools/$name" or die $!;
+            }
+            $f->{env}{PATH} = "$f->{base}/tools:$f->{env}{PATH}";
+            write_file("$f->{generic}/parts/selector/selected/pkg/.selector-choice", 'executed');
+            # parts/unlisted is not a command: the old fallback scanned its children.
+            write_file("$f->{generic}/parts/unlisted/demoapp/pkg/.scanned-choice", 'scanned');
+            write_file("$f->{generic}/parts/application/demoapp/pkg/.demoapp-choice", 'present');
+            write_file("$f->{generic}/common/pkg/.shared-choice", 'shared');
+            my @prefix = $nested ? ($perl, "$repo/bin/mutation_guard.pl", 'run', 'legacy', '--') : ();
+            my ($listed, $out, $err) = run($f, @prefix, 'bash', "$repo/envmaker.sh", 'listdirs');
+            ok($listed, "$mode nested=$nested lists directories") or diag($err);
+            unlike($out, qr{/parts/(?:selector|unlisted)}, 'ruleless unlisted parts are not selected or scanned');
+            like($out, qr{\Q$f->{generic}\E/parts/application/demoapp(?:\n|$)}, 'application child selected by presence');
+            my ($applied, undef, $error) = run($f, @prefix, 'bash', "$repo/envmaker.sh", '--yes', 'execstow', 'restow');
+            ok($applied, 'real guarded restow succeeds') or diag($error);
+            is(read_file("$f->{home}/.demoapp-choice"), 'present', 'application package is installed');
+            ok(!-e "$f->{home}/.selector-choice" && !-e "$f->{home}/.scanned-choice", 'ruleless part packages are not installed');
+            ok(!-e $log, 'no ruleless part name or application child was executed')
+                or diag(read_file($log));
         }
     }
 };

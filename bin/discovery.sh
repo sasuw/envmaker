@@ -33,6 +33,79 @@ check_and_execute_rule() {
     fi
 }
 
+# A selector value names one directory below its group. Reject anything that
+# could name a path outside it or act as a find pattern: an empty value, `.`,
+# `..`, a `/`, a newline, or a glob character.
+discovery_selector_value_is_safe() {
+    local value="$1"
+    [[ -n "$value" ]] || return 1
+    case "$value" in
+        . | .. | */* | *$'\n'* | *[][*?\\]*) return 1 ;;
+    esac
+    return 0
+}
+
+# Fallback for a part without a regular rules/<part> file.
+# Only three built-in two-level groups are evaluated:
+#   hostname     value of the `hostname` command selects parts/hostname/<value>
+#   ostype       value of the built-in `ostype` function selects parts/ostype/<value>
+#   application  `command -v <child>` (presence only) selects parts/application/<child>
+# Directories named `<value>*OR*` or `*OR*<value>` are selected as well. Any
+# other ruleless part is inactive: its name is never executed and its children
+# are never scanned. An empty, failed or unsafe selector value selects nothing.
+select_ruleless_group() {
+    local base_dir="$1"
+    local group="$2"
+    local group_dir="${base_dir}/${group}"
+    local value=""
+    local dir_to_add
+    local subdir
+    local subdir_name
+
+    case "$group" in
+        hostname | ostype)
+            if command -v "$group" >/dev/null 2>&1; then
+                value=$(dft_run_external "$group" 2>/dev/null) || value=""
+            fi
+            if ! discovery_selector_value_is_safe "$value"; then
+                debugEcho "Selector ${group} returned no usable value; selecting nothing below ${group_dir}"
+                return 0
+            fi
+            dir_to_add=$(find "$group_dir/" -mindepth 1 -maxdepth 1 -type d \( -name "$value*OR*" -o -name "*OR*$value" \) -print -quit)
+            debugEcho "Checking OR-dir ${dir_to_add}"
+            if [[ -n "$dir_to_add" && -d "$dir_to_add" ]]; then
+                debugEcho "Adding ${dir_to_add}"
+                directories+=("$dir_to_add")
+            fi
+            dir_to_add="${group_dir}/${value}"
+            debugEcho "Checking dir ${dir_to_add}"
+            if [[ -d "$dir_to_add" ]]; then
+                debugEcho "Adding ${dir_to_add}"
+                directories+=("$dir_to_add")
+            fi
+            ;;
+        application)
+            # Presence check only: neither `application` nor a child is executed.
+            for subdir in "$group_dir"/*/; do
+                [[ -d "$subdir" ]] || continue
+                subdir_name=$(basename "$subdir")
+                if command -v "$subdir_name" >/dev/null 2>&1; then
+                    debugEcho "Subdirectory ${subdir_name} found"
+                    directories+=("${group_dir}/${subdir_name}")
+                else
+                    debugEcho "Subdirectory ${subdir_name} not found"
+                fi
+            done
+            ;;
+        *)
+            debugEcho "Directory ${group} has no rule and is not a built-in selector group; inactive"
+            if verbose_enabled; then
+                echo "Part $group has no rule; inactive"
+            fi
+            ;;
+    esac
+}
+
 find_matching_directories() {
     # The base directory you want to search in
     local base_dir="$1"
@@ -40,9 +113,6 @@ find_matching_directories() {
     local dir_name
     local result
     local dir_to_add
-    local cmd_result
-    local subdir
-    local subdir_name
 
     directories=()
 
@@ -67,47 +137,8 @@ find_matching_directories() {
         elif [[ $result -eq 1 ]]; then
             debugEcho "Not adding directory based on RULE: ${dir_name}, also not checking further"
         else
-            # Execute the directory name as a command and store the result
             debugEcho "Directory ${dir_name} is not rule-based."
-            if command -v "$dir_name" >/dev/null 2>&1; then
-                set +e
-                cmd_result=$(dft_run_external "$dir_name" 2>/dev/null)
-                set -e
-            else
-                cmd_result=""
-            fi
-
-            if [ -z "$cmd_result" ]; then
-                #Here we have directories which can not be directly evaluated
-                debugEcho "Directory ${dir_name} cannot be executed as a command, let's iterate the subdirectories of it."
-                for subdir in "$base_dir/$dir_name"/*/; do
-                    [[ -d "$subdir" ]] || continue
-                    #directory name is not a command, let's check further if any subdir is an executable
-                    subdir_name=$(basename "$subdir")
-                    if command -v "$subdir_name" >/dev/null; then
-                        debugEcho "Subdirectory ${subdir_name} found"
-                        directories+=("$base_dir/$dir_name/$subdir_name")
-                    else
-                        debugEcho "Subdirectory ${subdir_name} not found"
-                    fi
-                done
-            else
-                #Here we have directories which can be directly evaluated as commands, e.g. "hostname"
-                #TODO: refactor, ugly construct
-                dir_to_add=$(find "$base_dir/$dir_name/" -maxdepth 1 -type d \( -name "$cmd_result*OR*" -o -name "*OR*$cmd_result" \) -print -quit)
-                debugEcho "Checking OR-dir ${dir_to_add}"
-                if [[ -n "$dir_to_add" && -d "$dir_to_add" ]]; then
-                    debugEcho "Adding ${dir_to_add}"
-                    directories+=("$dir_to_add")
-                fi
-
-                dir_to_add="$base_dir/$dir_name/$cmd_result"
-                debugEcho "Checking dir ${dir_to_add}"
-                if [ -d "$dir_to_add" ]; then
-                    debugEcho "Adding ${dir_to_add}"
-                    directories+=("$dir_to_add")
-                fi
-            fi
+            select_ruleless_group "$base_dir" "$dir_name"
         fi
         debugEcho -e "--------------------------\n"
     done

@@ -25,7 +25,9 @@ subdirectories are Stow packages too. For example,
 
 Executable `rules/<part-name>` scripts override automatic selection for that
 whole part: exit status 0 includes it, and 1 skips it. Machine-specific
-settings belong under `parts/hostname/<hostname>/`.
+settings belong under `parts/hostname/<hostname>/`, and OS-specific settings
+under `parts/ostype/<os>/`. Any other part needs a rule: without one it is
+never selected.
 
 The `.gitkeep` files preserve the empty directories in Git. They sit outside
 the Stow package directories and are not linked into `$HOME`.

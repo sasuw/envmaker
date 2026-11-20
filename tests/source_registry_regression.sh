@@ -140,61 +140,186 @@ test_source_id_ascii_and_locale_scope() (
     [[ "${LC_ALL-}" == "$source_locale" && "${LC_ALL+x}" == "$locale_was_set" ]] || fail 'ID validation leaked LC_ALL into the caller'
 )
 
+# Write a recording tripwire command: it logs its name and prints `choice`, so
+# the former name-executing fallback would also have selected parts/<name>/choice.
+# Callers run in their own fixture subshell; PATH and TRIPWIRE_LOG stay there.
+tripwire() {
+    local name
+    export TRIPWIRE_LOG="$HOME/tripwire.log" PATH="$HOME/bin:$PATH"
+    mkdir -p "$HOME/bin"
+    for name in "$@"; do
+        # shellcheck disable=SC2016 # Expanded by the tripwire at run time.
+        printf '#!/bin/sh\nprintf "%%s\\n" "%s" >> "$TRIPWIRE_LOG"\nprintf "choice\\n"\n' "$name" > "$HOME/bin/$name"
+        chmod +x "$HOME/bin/$name"
+    done
+}
+
 test_source_local_discovery_combinations() (
     fixture discovery
     export DISCOVERY_LOG="$HOME/rules.log"
-    mkdir -p "$HOME/bin" "$HOME/caller"
-    printf '#!/bin/sh\nprintf "choice\\n"\n' > "$HOME/bin/dft_fixture_part"
-    chmod +x "$HOME/bin/dft_fixture_part"
-    export PATH="$HOME/bin:$PATH"
+    mkdir -p "$HOME/caller"
+    # dft_fixture_part is an ordinary part; hostname is a built-in selector group.
+    tripwire dft_fixture_part
+    printf '#!/bin/sh\nprintf "choice\\n"\n' > "$HOME/bin/hostname"
+    chmod +x "$HOME/bin/hostname"
     cd "$HOME/caller"
-    # Cross every rule status in the lower source with every upper status.
-    for lower in active inactive missing nonexec; do
-        for upper in active inactive missing nonexec; do
-            : > "$DISCOVERY_LOG"
-            for source_id in generic personal; do
-                if [[ "$source_id" == generic ]]; then root="$GENERIC"; state="$lower"; else root="$PERSONAL"; state="$upper"; fi
-                mkdir -p "$root/parts/dft_fixture_part/choice/pkg" "$root/rules"
-                rule="$root/rules/dft_fixture_part"
-                # A missing/non-regular rule both use command fallback. A
-                # directory at the rule path tests the non-regular variant.
-                if [[ "$state" == missing ]]; then
-                    if [[ -f "$rule" ]]; then mv "$rule" "$rule.saved"; fi
-                    mkdir -p "$rule"
-                else
-                    if [[ -d "$rule" ]]; then rmdir "$rule"; fi
-                    result=1
-                    [[ "$state" != active ]] || result=0
-                    # The fixture expands its own rule context at runtime.
-                    # shellcheck disable=SC2016
-                    printf '#!/bin/sh\nprintf "%%s|%%s|%%s\\n" "$DOTFILES_DIR" "$DOTFILETRACKER_SOURCE_ID" "$PWD" >> "$DISCOVERY_LOG"\nexit %s\n' "$result" > "$rule"
-                    chmod 0644 "$rule"
-                    [[ "$state" == nonexec ]] || chmod +x "$rule"
-                fi
-            done
-            printf 'source.generic=%s\nsource.personal="%s"\n' "$GENERIC" "$PERSONAL" > "$CONFIG"
-            output=$(bash "$REPO_ROOT/envmaker.sh" listdirs)
-            contains "$output" "generic:$GENERIC/common"
-            contains "$output" "personal:$PERSONAL/common"
-            for source_id in generic personal; do
-                if [[ "$source_id" == generic ]]; then root="$GENERIC"; state="$lower"; else root="$PERSONAL"; state="$upper"; fi
-                case "$state" in
-                    active) contains "$output" "$source_id:$root/parts/dft_fixture_part" ;;
-                    missing) contains "$output" "$source_id:$root/parts/dft_fixture_part/choice" ;;
-                    *) [[ "$output" != *"$source_id:$root/parts/"* ]] || fail 'inactive source must stay inactive' ;;
-                esac
-                count=$(grep -Fc "$root|$source_id|$PWD" "$DISCOVERY_LOG" || true)
-                case "$state" in
-                    active|inactive) [[ "$count" == 1 ]] || fail 'rule must run once in source context with caller cwd' ;;
-                    *) [[ "$count" == 0 ]] || fail 'fallback/nonexec must not execute rule' ;;
-                esac
+    for part in dft_fixture_part hostname; do
+        # Cross every rule status in the lower source with every upper status.
+        for lower in active inactive missing nonexec; do
+            for upper in active inactive missing nonexec; do
+                : > "$DISCOVERY_LOG"
+                : > "$TRIPWIRE_LOG"
+                for source_id in generic personal; do
+                    if [[ "$source_id" == generic ]]; then root="$GENERIC"; state="$lower"; else root="$PERSONAL"; state="$upper"; fi
+                    mkdir -p "$root/parts/$part/choice/pkg" "$root/rules"
+                    rule="$root/rules/$part"
+                    # A missing and a non-regular rule both reach the ruleless
+                    # fallback. A directory at the rule path tests the non-regular variant.
+                    if [[ "$state" == missing ]]; then
+                        if [[ -f "$rule" ]]; then mv "$rule" "$rule.saved"; fi
+                        mkdir -p "$rule"
+                    else
+                        if [[ -d "$rule" ]]; then rmdir "$rule"; fi
+                        result=1
+                        [[ "$state" != active ]] || result=0
+                        # The fixture expands its own rule context at runtime.
+                        # shellcheck disable=SC2016
+                        printf '#!/bin/sh\nprintf "%%s|%%s|%%s\\n" "$DOTFILES_DIR" "$DOTFILETRACKER_SOURCE_ID" "$PWD" >> "$DISCOVERY_LOG"\nexit %s\n' "$result" > "$rule"
+                        chmod 0644 "$rule"
+                        [[ "$state" == nonexec ]] || chmod +x "$rule"
+                    fi
+                done
+                printf 'source.generic=%s\nsource.personal="%s"\n' "$GENERIC" "$PERSONAL" > "$CONFIG"
+                output=$(bash "$REPO_ROOT/envmaker.sh" listdirs)
+                contains "$output" "generic:$GENERIC/common"
+                contains "$output" "personal:$PERSONAL/common"
+                for source_id in generic personal; do
+                    if [[ "$source_id" == generic ]]; then root="$GENERIC"; state="$lower"; else root="$PERSONAL"; state="$upper"; fi
+                    case "$state:$part" in
+                        active:*) contains "$output" "$source_id:$root/parts/$part"$'\n' ;;
+                        missing:hostname) contains "$output" "$source_id:$root/parts/hostname/choice" ;;
+                        *) [[ "$output" != *"$source_id:$root/parts/"* ]] || fail "$state $part must stay inactive" ;;
+                    esac
+                    count=$(grep -Fc "$root|$source_id|$PWD" "$DISCOVERY_LOG" || true)
+                    case "$state" in
+                        active|inactive) [[ "$count" == 1 ]] || fail 'rule must run once in source context with caller cwd' ;;
+                        *) [[ "$count" == 0 ]] || fail 'fallback/nonexec must not execute rule' ;;
+                    esac
+                done
+                [[ ! -s "$TRIPWIRE_LOG" ]] || fail "ruleless part name executed: $(cat "$TRIPWIRE_LOG")"
             done
         done
+        # A genuinely absent regular rule also reaches the fallback.
+        mv "$PERSONAL/rules/$part" "$PERSONAL/rules/saved"
+        output=$(bash "$REPO_ROOT/envmaker.sh" listdirs)
+        if [[ "$part" == hostname ]]; then
+            contains "$output" "personal:$PERSONAL/parts/hostname/choice"
+        else
+            [[ "$output" != *"personal:$PERSONAL/parts/"* ]] || fail 'absent rule must leave an ordinary part inactive'
+        fi
+        [[ ! -s "$TRIPWIRE_LOG" ]] || fail "ruleless part name executed: $(cat "$TRIPWIRE_LOG")"
+        mv "$PERSONAL/rules/saved" "$PERSONAL/rules/$part"
     done
-    # A genuinely absent regular rule also triggers fallback.
-    mv "$PERSONAL/rules/dft_fixture_part" "$PERSONAL/rules/saved"
-    output=$(bash "$REPO_ROOT/envmaker.sh" listdirs)
-    contains "$output" "personal:$PERSONAL/parts/dft_fixture_part/choice"
+)
+
+# Discovery never executes the name of a ruleless
+# part. Only parts/hostname and parts/ostype run their built-in selector, and
+# parts/application checks child names with `command -v` only.
+test_ruleless_parts_never_execute() (
+    fixture tripwire
+    mkdir -p "$HOME/caller"
+    tripwire unruled dirrule application demoapp
+    cd "$HOME/caller"
+    for root in "$GENERIC" "$PERSONAL"; do
+        mkdir -p "$root/rules/dirrule"
+        # unruled and dirrule are tripwires on PATH; scanonly is not a command,
+        # so the old fallback scanned its children with command -v.
+        for part in unruled dirrule scanonly; do
+            # parts/<part>/demoapp would be selected by a child command -v scan,
+            # parts/<part>/choice by executing <part>, parts/<part> by a rule.
+            for child in demoapp choice pkg; do
+                mkdir -p "$root/parts/$part/$child/pkg"
+                printf '%s\n' "$part" > "$root/parts/$part/$child/pkg/.$part-$child"
+            done
+        done
+        mkdir -p "$root/parts/application/demoapp/pkg" "$root/parts/application/absent-command-dft33/pkg"
+    done
+    printf 'demoapp\n' > "$PERSONAL/parts/application/demoapp/pkg/.demoapp-file"
+    printf 'absent\n' > "$PERSONAL/parts/application/absent-command-dft33/pkg/.absent-file"
+    for mode in legacy stack; do
+        if [[ "$mode" == legacy ]]; then
+            printf 'dotfiles_dir=%s\n' "$PERSONAL" > "$CONFIG"
+            prefix=''
+            commands=(listdirs '--dry-run execstow restow')
+        else
+            printf 'source.generic=%s\nsource.personal="%s"\n' "$GENERIC" "$PERSONAL" > "$CONFIG"
+            prefix='personal:'
+            commands=(listdirs plan 'explain .demoapp-file' '--dry-run execstow restow')
+        fi
+        for command in "${commands[@]}"; do
+            : > "$TRIPWIRE_LOG"
+            read -r -a argv <<< "$command"
+            output=$(bash "$REPO_ROOT/envmaker.sh" "${argv[@]}" 2>&1) || fail "$mode $command failed: $output"
+            [[ ! -s "$TRIPWIRE_LOG" ]] || fail "$mode $command executed: $(tr '\n' ' ' < "$TRIPWIRE_LOG")"
+            for part in unruled dirrule scanonly; do
+                [[ "$output" != *"/parts/$part"* ]] || fail "$mode $command selected ruleless part $part: $output"
+            done
+            [[ "$output" != *absent-command-dft33* ]] || fail "$mode $command selected an absent application"
+            case "$command" in
+                listdirs) contains "$output" "$prefix$PERSONAL/parts/application/demoapp" ;;
+                plan) contains "$output" "$PERSONAL/parts/application/demoapp/pkg" ;;
+                explain*) contains "$output" '"source_id":"personal"' ;;
+            esac
+        done
+    done
+    [[ ! -e "$HOME/.demoapp-file" && ! -e "$XDG_STATE_HOME" ]] || fail 'dry runs must not change the fixture home'
+)
+
+# The hostname/ostype selector value names one child of its group. An empty,
+# failed or unsafe value selects nothing, never a path outside the group.
+test_selector_value_failure_model() (
+    fixture selector-values
+    mkdir -p "$HOME/bin" "$HOME/caller"
+    cd "$HOME/caller"
+    for child in choice other_OR_choice '*' '?' '[c]hoice' 'a\b'; do
+        mkdir -p "$GENERIC/parts/hostname/$child/pkg"
+    done
+    mkdir -p "$GENERIC/parts/hostname/choice/x/pkg"
+    printf 'source.generic=%s\n' "$GENERIC" > "$CONFIG"
+    for value in valid '' . .. '../hostname' 'choice/x' $'choice\nx' '*' '?' '[c]hoice' 'a\b' failed; do
+        if [[ "$value" == valid ]]; then
+            printf '#!/bin/sh\nprintf "choice\\n"\n' > "$HOME/bin/hostname"
+        elif [[ "$value" == failed ]]; then
+            printf '#!/bin/sh\nprintf "choice\\n"\nexit 3\n' > "$HOME/bin/hostname"
+        else
+            # shellcheck disable=SC2016 # Expanded by the fake hostname.
+            printf '#!/bin/sh\nprintf "%%s\\n" "$SELECTOR_VALUE"\n' > "$HOME/bin/hostname"
+        fi
+        chmod +x "$HOME/bin/hostname"
+        output=$(SELECTOR_VALUE="$value" PATH="$HOME/bin:$PATH" selector_discovery) || fail "discovery failed for $(printf '%q' "$value")"
+        output+=$'\n'$(SELECTOR_VALUE="$value" PATH="$HOME/bin:$PATH" bash "$REPO_ROOT/envmaker.sh" listdirs) \
+            || fail "listdirs failed for $(printf '%q' "$value")"
+        contains "$output" "generic:$GENERIC/common"
+        if [[ "$value" == valid ]]; then
+            contains "$output" "generic:$GENERIC/parts/hostname/choice"$'\n'
+            contains "$output" "generic:$GENERIC/parts/hostname/other_OR_choice"$'\n'
+            [[ $(grep -c '/parts/' <<< "$output") == 4 ]] || fail "valid selector selected extra directories: $output"
+        else
+            [[ "$output" != *"/parts"* ]] || fail "selector value $(printf '%q' "$value") selected: $output"
+        fi
+    done
+)
+
+selector_discovery() (
+    # shellcheck source=bin/discovery.sh
+    source "$REPO_ROOT/bin/discovery.sh"
+    # shellcheck source=bin/mutation_guard.sh
+    source "$REPO_ROOT/bin/mutation_guard.sh"
+    debugEcho() { :; }
+    verbose_enabled() { return 1; }
+    dft_load_registry '' "generic=$GENERIC"
+    discover_stack_packages
+    printf 'generic:%s\n' "${STACK_DIRECTORY_PATHS[@]}"
 )
 
 test_stack_public_dispatch() (
@@ -312,6 +437,75 @@ PERL
     [[ ! -e "$XDG_STATE_HOME" ]] || fail 'probe must not create applied state'
 )
 
+test_hostname_called_only_for_parts_hostname() (
+    fixture hostname-calls
+    mkdir -p "$HOME/bin" "$HOME/caller"
+    cd "$HOME/caller"
+    export HOSTNAME_CALL_LOG="$HOME/hostname-calls.log"
+    # shellcheck disable=SC2016 # Expanded by the fake hostname at run time.
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'printf "called\n" >> "$HOSTNAME_CALL_LOG"' \
+        'if [ "${HOSTNAME_PRINT:-1}" = 1 ]; then printf "choice\n"; fi' \
+        'exit "${HOSTNAME_RC:-0}"' > "$HOME/bin/hostname"
+    chmod +x "$HOME/bin/hostname"
+    export PATH="$HOME/bin:$PATH"
+
+    # Sources without parts/hostname: 0 hostname calls in stack and legacy modes.
+    printf 'source.generic=%s\nsource.personal="%s"\n' "$GENERIC" "$PERSONAL" > "$CONFIG"
+    : > "$HOSTNAME_CALL_LOG"
+    output=$(bash "$REPO_ROOT/envmaker.sh" listdirs)
+    contains "$output" "generic:$GENERIC/common"
+    contains "$output" "personal:$PERSONAL/common"
+    [[ $(wc -l < "$HOSTNAME_CALL_LOG") -eq 0 ]] || fail "expected 0 hostname calls without parts/hostname, got $(wc -l < "$HOSTNAME_CALL_LOG")"
+
+    : > "$HOSTNAME_CALL_LOG"
+    output=$(bash "$REPO_ROOT/envmaker.sh" --dotfiles-dir "$GENERIC" listdirs)
+    contains "$output" "$GENERIC/common"
+    [[ $(wc -l < "$HOSTNAME_CALL_LOG") -eq 0 ]] || fail "expected 0 hostname calls in legacy mode without parts/hostname, got $(wc -l < "$HOSTNAME_CALL_LOG")"
+
+    # One source with parts/hostname: 1 hostname call in stack and legacy modes.
+    mkdir -p "$GENERIC/parts/hostname/choice/pkg"
+    : > "$HOSTNAME_CALL_LOG"
+    output=$(bash "$REPO_ROOT/envmaker.sh" listdirs)
+    contains "$output" "generic:$GENERIC/parts/hostname/choice"
+    [[ $(wc -l < "$HOSTNAME_CALL_LOG") -eq 1 ]] || fail "expected 1 hostname call with one source, got $(wc -l < "$HOSTNAME_CALL_LOG")"
+
+    : > "$HOSTNAME_CALL_LOG"
+    output=$(bash "$REPO_ROOT/envmaker.sh" --dotfiles-dir "$GENERIC" listdirs)
+    contains "$output" "$GENERIC/parts/hostname/choice"
+    [[ $(wc -l < "$HOSTNAME_CALL_LOG") -eq 1 ]] || fail "expected 1 hostname call in legacy mode, got $(wc -l < "$HOSTNAME_CALL_LOG")"
+
+    # Two sources with parts/hostname: 1 hostname call per such source.
+    mkdir -p "$PERSONAL/parts/hostname/choice/pkg"
+    : > "$HOSTNAME_CALL_LOG"
+    output=$(bash "$REPO_ROOT/envmaker.sh" listdirs)
+    contains "$output" "generic:$GENERIC/parts/hostname/choice"
+    contains "$output" "personal:$PERSONAL/parts/hostname/choice"
+    [[ $(wc -l < "$HOSTNAME_CALL_LOG") -eq 2 ]] || fail "expected 2 hostname calls with two sources, got $(wc -l < "$HOSTNAME_CALL_LOG")"
+
+    # Failing fake (exit 3) and missing-like fake (exit 127) leave listdirs at exit 0
+    # with common listed and no parts/hostname/* selected.
+    for mode in stack legacy; do
+        local args=(listdirs)
+        [[ "$mode" == stack ]] || args=(--dotfiles-dir "$GENERIC" listdirs)
+        local expected_calls=2
+        [[ "$mode" == stack ]] || expected_calls=1
+
+        : > "$HOSTNAME_CALL_LOG"
+        output=$(HOSTNAME_PRINT=1 HOSTNAME_RC=3 bash "$REPO_ROOT/envmaker.sh" "${args[@]}") || fail "$mode listdirs failed when hostname exited 3"
+        contains "$output" "$GENERIC/common"
+        [[ "$output" != *"/parts/hostname"* ]] || fail "$mode failing hostname (exit 3) selected parts/hostname: $output"
+        [[ $(wc -l < "$HOSTNAME_CALL_LOG") -eq $expected_calls ]] || fail "$mode expected $expected_calls calls on exit 3, got $(wc -l < "$HOSTNAME_CALL_LOG")"
+
+        : > "$HOSTNAME_CALL_LOG"
+        output=$(HOSTNAME_PRINT=0 HOSTNAME_RC=127 bash "$REPO_ROOT/envmaker.sh" "${args[@]}") || fail "$mode listdirs failed when hostname exited 127"
+        contains "$output" "$GENERIC/common"
+        [[ "$output" != *"/parts/hostname"* ]] || fail "$mode missing-like hostname (exit 127) selected parts/hostname: $output"
+        [[ $(wc -l < "$HOSTNAME_CALL_LOG") -eq $expected_calls ]] || fail "$mode expected $expected_calls calls on exit 127, got $(wc -l < "$HOSTNAME_CALL_LOG")"
+    done
+)
+
 if [[ $# -eq 1 && ( "$1" == --help || "$1" == -h ) ]]; then
     printf 'Usage: bash tests/source_registry_regression.sh [test_function ...]\n'
     exit 0
@@ -319,8 +513,9 @@ fi
 if [[ $# -eq 0 ]]; then
     set -- test_registry_order_and_overrides test_registry_legacy_aliases_and_data \
         test_registry_rejects_ambiguous_inputs test_source_local_discovery_combinations \
+        test_ruleless_parts_never_execute test_selector_value_failure_model \
         test_stack_public_dispatch test_write_destinations test_raw_candidate_inventory test_stow_module_discovery \
-        test_source_id_ascii_and_locale_scope
+        test_source_id_ascii_and_locale_scope test_hostname_called_only_for_parts_hostname
 fi
 for test_case in "$@"; do
     case "$test_case" in test_*) declare -F "$test_case" >/dev/null || fail "Unknown test: $test_case" ;; *) fail "Invalid test: $test_case" ;; esac

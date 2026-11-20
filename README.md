@@ -46,7 +46,9 @@ bash "$HOME/envmaker/envmaker.sh" --dotfiles-dir "$HOME/dotfiles" execstow resto
 
 Each immediate directory under `common/` is a Stow package. Its contents mirror
 home-relative paths. Optional packages use `parts/application/<command>/<package>/`.
-An executable `rules/<part-name>` can decide selection. See the generated
+An executable `rules/<part-name>` can decide selection. Without a rule, only
+`parts/hostname/<host>`, `parts/ostype/<os>` and `parts/application/<command>`
+are evaluated; any other part is inactive and its name is never executed. See the generated
 `docs/getting_started.md` for the layout. `init` refuses a populated directory
 and creates no links or configuration.
 
@@ -101,7 +103,7 @@ After an interrupted operation, a human runs `recover inspect` and chooses
 
 ## Ownership and executable inputs
 
-Rules and fallback commands execute during discovery, including preview.
+Rules and the `hostname` selector execute during discovery, including preview.
 Dry-run suppresses wrapper mutations; it does not sandbox those programs.
 Hooks run source by source after successful Stow/restow; their failures warn
 without undoing the completed link operation. Register only trusted trees.

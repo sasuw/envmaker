@@ -33,8 +33,11 @@ The phase-3 backend is described in the [generation and recovery reference](over
 
 Planning performs no Stow apply or simulation, target ownership reconciliation,
 backup, generation publication or persistent state mutation. It is not an apply
-preview that has passed those later checks. Trusted source rules and command
-fallbacks can still have side effects during discovery, as with `listdirs`.
+preview that has passed those later checks. Trusted source rules and the
+`hostname` selector can still have side effects during discovery, as with
+`listdirs`. A part without a rule never runs its own name as a command; see
+[source-local rules](source_registry.md) for the built-in `hostname`, `ostype`
+and `application` groups.
 
 ## Precedence and selection
 
