@@ -1,135 +1,311 @@
 # envmaker
 
-envmaker discovers packages in separate dotfiles repositories and uses GNU Stow
-to link them into `$HOME`. It supports one repository or an ordered stack where
-personal files override generic files by their home-relative target path.
+envmaker links your dotfiles into `$HOME` with GNU Stow. You keep your
+configuration files in a Git repository; envmaker picks the packages that fit
+the current machine and links them into place. You can use one repository, or
+stack a shared "generic" repository under a "personal" one so that your own
+files override the shared ones.
 
-This is a release candidate. No public version is published yet. After a
-reviewed release is published, a human can install from the intended location:
+An example dotfiles repository in envmaker's layout is
+[sasuw/dotfiles](https://github.com/sasuw/dotfiles).
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph repos["Your dotfiles repositories"]
+        generic["generic<br/>(lower priority)"]
+        personal["personal<br/>(higher priority)"]
+    end
+    discovery["Select packages<br/>common/ + matching parts/"]
+    planner["Pick one winner<br/>per file in $HOME"]
+    stow["GNU Stow"]
+    home[/"$HOME<br/>symlinks"/]
+    state[("Ownership records<br/>~/.local/state/dotfiletracker")]
+
+    generic --> discovery
+    personal --> discovery
+    discovery -->|one repository| stow
+    discovery -->|stack of repositories| planner
+    planner --> stow
+    planner -.->|records links| state
+    stow --> home
+```
+
+1. **Select.** In each repository, everything under `common/` is used. Packages
+   under `parts/` are used only when they match this machine: its host name,
+   its operating system, an installed command, or a rule script you write.
+2. **Resolve.** With several repositories, envmaker decides which repository
+   provides each file. The highest-priority repository wins the whole file.
+3. **Link.** GNU Stow creates the symlinks in `$HOME`. In stack mode envmaker
+   records which links it owns, so it can later remove or move exactly those.
+
+## Install
+
+envmaker is a set of Bash and Perl scripts; there is nothing to build.
 
 ```bash
 git clone https://github.com/sasuw/envmaker.git "$HOME/envmaker"
-cd "$HOME/envmaker"
-# A human selects the reviewed release commit before running code.
-git checkout --detach RELEASE_COMMIT
 ```
 
-`RELEASE_COMMIT` is a placeholder until publication. Never substitute an
-unreviewed branch for the release commit. This project contains the installer
-wrapper, not the dotfiles. Example public dotfiles belong in a separate checkout
-from `https://github.com/sasuw/dotfiles` after that repository is released.
+You also need:
 
-## Prerequisites
+- Bash, Git and standard Unix tools such as `find`, `awk`, `sed`, `xargs`,
+  `readlink` and `mktemp`.
+- Perl 5.16 or newer with its core modules, including `JSON::PP` and
+  `Unicode::Normalize`. Some distributions package core modules separately.
+- GNU Stow 2.4.1 installed at `/opt/stow-2.4.1/bin/stow`, with its Perl modules.
 
-- Bash, Git and standard Unix utilities (`find`, `sort`, `readlink`, `mktemp`).
-- Perl 5.16 or newer and its core modules, including `JSON::PP` and `Unicode::Normalize`.
-- GNU Stow 2.4.1 at `/opt/stow-2.4.1/bin/stow`, including its matching Perl modules.
+envmaker does not install any of these. [Prerequisites](docs/prerequisites.md)
+shows how to build and install Stow under `/opt`, which needs administrator
+rights. envmaker is tested on Linux; macOS and FreeBSD have not been verified.
 
-A human must complete the [Stow installation step](docs/prerequisites.md)
-before applying dotfiles. Installing under `/opt` requires administrator
-privileges. The wrapper does not install prerequisites. Old package-installing
-and Perl-building helpers are not included. Native macOS and FreeBSD runtime
-support has not been verified; Linux results do not establish it.
-
-## One dotfiles repository
-
-A human creates a new tree or uses an existing trusted checkout:
+The examples below call `envmaker.sh` through a shell variable:
 
 ```bash
-bash "$HOME/envmaker/envmaker.sh" init "$HOME/dotfiles"
-# Add common/example/.config/example/config inside the new checkout.
-bash "$HOME/envmaker/envmaker.sh" --dotfiles-dir "$HOME/dotfiles" listdirs
-bash "$HOME/envmaker/envmaker.sh" --dotfiles-dir "$HOME/dotfiles" --yes --dry-run execstow stow
-bash "$HOME/envmaker/envmaker.sh" --dotfiles-dir "$HOME/dotfiles" --yes execstow stow
-bash "$HOME/envmaker/envmaker.sh" --dotfiles-dir "$HOME/dotfiles" execstow restow
+envmaker="$HOME/envmaker/envmaker.sh"
 ```
 
-Each immediate directory under `common/` is a Stow package. Its contents mirror
-home-relative paths. Optional packages use `parts/application/<command>/<package>/`.
-An executable `rules/<part-name>` can decide selection. Without a rule, only
-`parts/hostname/<host>`, `parts/ostype/<os>` and `parts/application/<command>`
-are evaluated; any other part is inactive and its name is never executed. See the generated
-`docs/getting_started.md` for the layout. `init` refuses a populated directory
-and creates no links or configuration.
+## Use one dotfiles repository
 
-For a persistent single root, a human creates
-`${XDG_CONFIG_HOME:-$HOME/.config}/dotfiletracker/config` containing:
+Create a new dotfiles repository, or use an existing one you trust:
+
+```bash
+bash "$envmaker" init "$HOME/dotfiles"
+```
+
+`init` creates an empty Git repository with this layout. It refuses a
+directory that already has content, and it creates no links.
+
+```text
+dotfiles/
+├── common/                      # always used
+│   └── git/                     # a Stow package
+│       └── .gitconfig           #   -> ~/.gitconfig
+├── parts/                       # used only when they match this machine
+│   ├── hostname/laptop/         # only on the host named "laptop"
+│   ├── ostype/macos/            # only on macOS
+│   ├── application/tmux/        # only if the tmux command is installed
+│   └── work/                    # only if rules/work exits with 0
+└── rules/
+    └── work                     # executable rule script for parts/work
+```
+
+Each directory directly below `common/` is a Stow package. Its contents mirror
+paths relative to `$HOME`, so `common/git/.gitconfig` becomes `~/.gitconfig`.
+A selected part works the same way: each directory directly below it, such as
+`parts/hostname/laptop/ssh/`, is a package.
+
+This is how envmaker decides which parts to use:
+
+```mermaid
+flowchart TD
+    part(["Each directory in parts/"]) --> hasrule{"Is there a<br/>rules/NAME file?"}
+    hasrule -->|yes| run["Run the rule"]
+    run --> exit0{"Exit status 0?"}
+    exit0 -->|yes| used["Part is used"]
+    exit0 -->|no| skipped["Part is skipped"]
+    hasrule -->|no| builtin{"Which name?"}
+    builtin -->|hostname| host["Use parts/hostname/HOST<br/>HOST = output of hostname"]
+    builtin -->|ostype| os["Use parts/ostype/OS<br/>linux, macos, bsd, ..."]
+    builtin -->|application| app["Use each parts/application/CMD<br/>whose command CMD is installed"]
+    builtin -->|anything else| inactive["Part is ignored<br/>(never executed)"]
+```
+
+A rule file that is not executable skips its part. Parts named
+`hostname`, `ostype` and `application` never execute a part name: only
+the `hostname` command runs, and installed commands are only looked up.
+The generated `docs/getting_started.md` in your new repository explains the
+layout again.
+
+Preview, then apply:
+
+```bash
+bash "$envmaker" --dotfiles-dir "$HOME/dotfiles" listdirs
+bash "$envmaker" --dotfiles-dir "$HOME/dotfiles" --yes --dry-run execstow stow
+bash "$envmaker" --dotfiles-dir "$HOME/dotfiles" --yes execstow stow
+```
+
+After you add or remove files, run `execstow restow` the same way.
+
+envmaker always runs Stow with `--no-folding`: directories in `$HOME` stay real
+directories, and each file gets its own link. This lets several packages put
+files into the same directory, such as `~/.config`.
+
+To avoid typing `--dotfiles-dir` each time, create
+`${XDG_CONFIG_HOME:-$HOME/.config}/dotfiletracker/config` with:
 
 ```text
 dotfiles_dir="~/dotfiles"
 ```
 
-`--dotfiles-dir` overrides that config for one invocation. Legacy operation
-backs up conflicts with numbered `.orig` names. A human inspects those backups
-before removing them. A human previews `--yes --dry-run execstow delete`, then
-uses `--yes execstow delete` to unlink the selected packages; `--yes del` removes
-links into that root. Keep source trees available for legacy deletion.
+`--dotfiles-dir` still overrides this file for a single run. It is refused
+when a stack (see below) already manages your home directory.
 
-## Generic and personal stack
+If a regular file is in the way of a link, envmaker moves it aside before
+linking: first to `FILE.orig`, then `FILE.orig.1`, `FILE.orig.2` and so on.
+Check those backups before you delete them. A symlink in the way is not moved;
+Stow then reports a conflict.
 
-A human registers existing trusted checkouts in the same config, in ascending
-priority order, instead of `dotfiles_dir`:
+To remove the links again, preview with `--yes --dry-run execstow delete`, then
+run `--yes execstow delete`. It unlinks only the packages that are selected
+right now. Links from a part that is no longer selected, for example because
+its rule now fails or its command was uninstalled, stay in place. So keep the
+repository and its original selection (rules, host name, installed commands)
+until `execstow delete` has removed all its links.
+
+`ls` lists links into the repository up to two levels below `$HOME`, and
+`--yes del` removes links into the repository up to four levels below `$HOME`,
+whether or not their part is still selected. Deeper links, such as
+`~/.local/share/app/data/file`, are not touched by either.
+
+The commands `plan`, `explain` and `migrate` work only in stack mode.
+
+## Stack a generic and a personal repository
+
+Put the repositories in the same config file instead of `dotfiles_dir`, lowest
+priority first:
 
 ```text
 source.generic="~/dotfiles/generic"
 source.personal="~/dotfiles/personal"
 ```
 
-Later sources win whole files, regardless of package name or whether bytes
-differ. A full personal fork overrides every matching generic file. Removing
-the upper file restores the lower file on the next apply.
+Use either `source.*` entries or `dotfiles_dir`, not both.
 
-For an initially unlinked target, a human runs:
-
-```bash
-bash "$HOME/envmaker/envmaker.sh" plan
-bash "$HOME/envmaker/envmaker.sh" --dry-run execstow restow
-bash "$HOME/envmaker/envmaker.sh" execstow restow
-bash "$HOME/envmaker/envmaker.sh" explain .config/example/config
-bash "$HOME/envmaker/envmaker.sh" ls
+```mermaid
+flowchart LR
+    subgraph generic["source.generic (lower)"]
+        g_git[".gitconfig"]
+        g_bash[".bashrc"]
+    end
+    subgraph personal["source.personal (higher)"]
+        p_git[".gitconfig"]
+    end
+    subgraph home["$HOME"]
+        h_git["~/.gitconfig"]
+        h_bash["~/.bashrc"]
+    end
+    h_git -->|links to| p_git
+    h_bash -->|links to| g_bash
+    g_git -.-|hidden| p_git
 ```
 
-Repeated `--source ID=PATH` flags replace the config list for that invocation.
-Stack mode refuses unmanaged files, unrelated links and replaced managed
-entries. It does not apply legacy conflict backups. A human can preview
-`--yes --dry-run execstow delete`, then unlink recorded owned links with
-`--yes execstow delete` or `--yes del`, even if a source is unavailable.
+The higher repository wins each file as a whole, by its path in `$HOME`. It
+does not matter which package the file is in, or whether both copies are
+identical. Delete the personal copy and the next apply links the generic one
+again. Each repository keeps its own rules and hooks.
 
-Existing direct or folded Stow links need explicit migration. A human follows
-[migration and recovery](docs/migrate_overlay.md), starting with
-`--dry-run migrate --from generic`, then `--yes migrate --from generic`.
-After an interrupted operation, a human runs `recover inspect` and chooses
-`recover resume` or `recover restore`. The switch is not atomic.
+For a home directory that has no envmaker links yet:
 
-## Ownership and executable inputs
+```bash
+bash "$envmaker" plan                          # which repository wins each file (JSON)
+bash "$envmaker" --dry-run execstow restow     # preview
+bash "$envmaker" execstow restow               # apply
+bash "$envmaker" explain .gitconfig            # who provides this file, who is hidden (JSON)
+bash "$envmaker" ls                            # recorded links and their owners (JSON)
+bash "$envmaker" listdirs                      # selected directories as ID:PATH
+```
 
-Rules and the `hostname` selector execute during discovery, including preview.
-Dry-run suppresses wrapper mutations; it does not sandbox those programs.
-Hooks run source by source after successful Stow/restow; their failures warn
-without undoing the completed link operation. Register only trusted trees.
+A repeated `--source ID=PATH` option replaces the configured list for one run.
 
-Editing through a home link edits its winning source. Editors that replace
-links may create conflicts. Utility writers require `--source ID` in stack
-mode, or explicit source file paths for rewrite utilities. This also applies to
-completion imports using `--no-stow`.
+Stack mode is stricter than single-repository mode. It refuses to touch files
+it does not manage, links that point elsewhere, and managed links that someone
+replaced. It does not make `.orig` backups. To remove its links, preview with
+`--yes --dry-run execstow delete`, then run `--yes execstow delete` or
+`--yes del`. Removal uses envmaker's records, so it also works when a
+repository is no longer available.
 
-Configuration uses `XDG_CONFIG_HOME`; persistent ownership/journal state uses
-`${XDG_STATE_HOME:-$HOME/.local/state}/dotfiletracker`. Generation evidence is
-retained without automatic pruning. See the [registry](docs/source_registry.md),
-[planner](docs/overlay_planner.md) and [state/recovery](docs/overlay_state.md)
-references for exact formats, lock scope and conflict handling.
+### Switch from existing Stow links
 
-## Development checks
+If your home directory already has links from an earlier single-repository
+setup or from plain Stow, migrate them explicitly. `--from` names the
+repository that owns the old links.
 
-Contributors run `python3 -I scripts/scan_public.py --root .` with the pinned
-gitleaks version, then `bash scripts/check_public.sh`. The latter runs syntax,
-ShellCheck, the retained runtime suites and an isolated install smoke test.
-All checks fail on tool errors. See [scan policy](docs/public_scan.md).
-The release process also requires a private pre-export term check of file and
-directory names, contents and symlink text. The term list remains private.
-The check prerequisites include Zsh for alias-conversion validation, POSIX AWK
-and the Unix tools listed in that reference; they exceed the installer runtime
-prerequisites above. CI installs the check and Stow build packages explicitly.
+```mermaid
+flowchart LR
+    preview["migrate --from generic<br/>with --dry-run"] --> migrate["migrate --from generic<br/>with --yes"]
+    migrate -->|success| done(["Stack links in place"])
+    migrate -->|interrupted| inspect["recover inspect"]
+    inspect --> resume["recover resume<br/>finish the switch"]
+    inspect --> restore["recover restore<br/>go back to the old links"]
+```
 
-The project uses the [MIT license](LICENSE). GNU Stow and other separately
-installed prerequisites retain their own licenses.
+```bash
+bash "$envmaker" --dry-run migrate --from generic
+bash "$envmaker" --yes migrate --from generic
+```
+
+The switch is not atomic. If it stops halfway, run `recover inspect` and then
+either `recover resume` or `recover restore`. The
+[migration and recovery guide](docs/migrate_overlay.md) covers every step and
+refusal.
+
+## Things to know before you use it
+
+- **Rules and hooks are programs.** Rule scripts and the `hostname` command run
+  during selection, also in a preview. `--dry-run` stops envmaker from changing
+  files; it does not sandbox those programs. Only register repositories you
+  trust.
+- **Post-stow hooks.** Executable files in `hooks/post-stow.d/` of a repository
+  run in name order after a successful `stow` or `restow`, and in stack mode
+  also after a `migrate` or an apply that changed nothing. Each gets the Stow
+  action (`stow` or `restow`) as its argument and `DOTFILES_DIR` in its
+  environment, plus `DOTFILETRACKER_SOURCE_ID` in stack mode. Hooks never run
+  in a preview, on deletion or during recovery. A failing hook prints a warning
+  and does not undo the links.
+- **Editing through a link edits the source.** Opening `~/.gitconfig` edits the
+  file in the repository that provides it. Some editors save by replacing the
+  link with a regular file. In single-repository mode, the next `stow` or
+  `restow` moves that file aside as a `.orig` backup and restores the link, so
+  copy your changes into the repository before you delete the backup. In stack
+  mode, envmaker reports a conflict and leaves the file alone until you move it
+  yourself.
+- **Helper scripts.** `util/add-zsh-completion.sh` saves a Zsh completion into
+  `parts/application/COMMAND/completions/`. `util/convert_aliases_to_functions.sh`
+  and `util/remove_function_keyword.sh` rewrite shell files in a repository.
+  In stack mode they need `--source ID`; the two rewrite helpers also accept
+  explicit source file paths. This includes completion imports with
+  `--no-stow`.
+- **Where data lives.** The configuration file is
+  `${XDG_CONFIG_HOME:-$HOME/.config}/dotfiletracker/config`. Ownership records
+  and the operation journal are in
+  `${XDG_STATE_HOME:-$HOME/.local/state}/dotfiletracker`. Old records are kept;
+  envmaker never deletes them automatically.
+- **Two files in your home directory.** Every operation that changes links
+  creates `~/.dotfiletracker-lock` and `~/.dotfiletracker-owner.json`. They
+  prevent two envmaker runs from changing your home directory at once. Do not
+  delete them.
+- **Environment variables.** `ASSUME_YES=1` works like `--yes`.
+  `STOW_VERSION=VERSION` selects `/opt/stow-VERSION/bin/stow`; see
+  [prerequisites](docs/prerequisites.md).
+
+Reference documentation:
+
+- [Source registry](docs/source_registry.md): config format and source rules.
+- [Overlay planner](docs/overlay_planner.md): how winners and conflicts are decided.
+- [Overlay state and recovery](docs/overlay_state.md): records, journal and locks.
+- [Migration and recovery](docs/migrate_overlay.md): switching from existing links.
+- [Prerequisites](docs/prerequisites.md) and [testing](docs/testing.md).
+
+## Development
+
+Run the checks before you send a change:
+
+```bash
+python3 -I scripts/scan_public.py --root .
+bash scripts/check_public.sh
+```
+
+The first scans for secrets with a pinned gitleaks version. The second checks
+the syntax of all shell and Perl files, runs ShellCheck on itself, and runs a
+smoke test and the regression suites in a temporary home directory. Both fail on tool errors. The checks need more
+tools than envmaker itself, such as Zsh and POSIX AWK; see the
+[scan policy](docs/public_scan.md) for the full list. CI installs them
+explicitly. Before each release, the maintainers also run a private check for
+names and terms that must not be published.
+
+## License
+
+envmaker is released under the [MIT license](LICENSE). GNU Stow and the other
+prerequisites keep their own licenses.

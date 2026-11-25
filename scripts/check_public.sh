@@ -10,7 +10,7 @@ esac
 # Include tools called by runtime helpers, nested suites and their fixtures.
 for tool in awk basename bash cat chmod cmp cp dirname env find git grep \
   hostname ln mkdir mktemp mv perl python3 readlink rm rmdir sed sh shellcheck \
-  stat tail tput true uname xargs zsh; do
+  stat tail tput tr true uname wc xargs zsh; do
   # Perl also execs true directly, so a shell builtin is not sufficient.
   type -P "$tool" >/dev/null || { printf 'Missing dependency: %s\n' "$tool" >&2; exit 1; }
 done

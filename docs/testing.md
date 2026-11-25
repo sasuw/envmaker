@@ -9,8 +9,7 @@ fail before running a suite; deletion never falls back to filesystem paths.
 
 ## Running suites
 
-From the repository root, a contributor runs suites without startup-file
-injection:
+From the repository root, run the suites without startup-file injection:
 
 ```bash
 env -u BASH_ENV -u ENV bash tests/init_repo_regression.sh
@@ -20,7 +19,8 @@ python3 -I tests/fixture_lifecycle_test.py
 
 The main regression suite accepts named test functions. With no arguments it
 also runs the other Bash suites, the Perl overlay suites, and the lifecycle
-regressions. Python exporter and scanner suites run separately with `unittest`.
+regressions. `scripts/check_public.sh` runs `tests/public_smoke.py` and then
+`tests/envmaker_regression.sh`.
 
 ## Cleanup and diagnosis
 
@@ -48,7 +48,7 @@ not follow symlinks inside the root. A cleanup refusal or error produces a
 nonzero result and names the retained path. No prefix scan or historical fixture
 cleanup is provided. Fixtures must not be concurrently renamed during teardown.
 
-A contributor can inspect a new run's cleanup without deleting its fixtures:
+To inspect a new run's cleanup without deleting its fixtures, run:
 
 ```bash
 python3 -B tests/fixture_lifecycle.py --dry-run -- bash tests/init_repo_regression.sh

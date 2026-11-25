@@ -57,20 +57,24 @@ The planner resolves priority by home target, not package name. See the
 [overlay planner reference](overlay_planner.md) for precedence, ignore behavior,
 conflicts, the portable target namespace and JSON output.
 
-Rules run once per source discovery, in the caller's working directory, with
-`DOTFILES_DIR` set to the physical source root and `DOTFILETRACKER_SOURCE_ID`
-set to its ID. A successful executable rule selects its source's part; any
+Rules run once per source discovery, in the caller's working directory. In
+stack mode they get `DOTFILES_DIR` set to the physical source root and
+`DOTFILETRACKER_SOURCE_ID` set to its ID; single-repository rules get neither
+variable. A successful executable rule selects its source's part; any
 nonzero result makes that part inactive. A non-executable regular rule is also
 inactive. A missing or non-regular rule uses the built-in fallback, which
 knows only three part names:
 
 - `parts/hostname/<host>` is selected by the output of the `hostname` command;
-- `parts/ostype/<os>` is selected by the output of the built-in `ostype` function;
+- `parts/ostype/<os>` is selected by the output of the built-in `ostype` function:
+  `linux`, `macos`, `bsd`, `solaris`, `windows`, or `unknown: ...` for any other
+  system;
 - `parts/application/<command>` is selected when `command -v <command>`
   finds the command; neither `application` nor `<command>` is executed.
 
-A `<value>*OR*` or `*OR*<value>` sibling is selected with the value's own
-directory. An empty or failed value, `.`, `..`, or a value with `/`, a newline
+For `hostname` and `ostype`, one directory whose name matches the shell
+pattern `<value>*OR*` or `*OR*<value>` is selected in addition to the value's
+own directory. The pattern is loose: the value `laptop` also matches `laptop2ORwork`. An empty or failed value, `.`, `..`, or a value with `/`, a newline
 or a glob character selects nothing. Every other part without a regular rule is
 inactive: discovery never executes its name and never scans its subdirectories.
 One source's inactive rule never disables a part in another source.
@@ -88,14 +92,14 @@ configuration-based utility writers. `bin/discovery.sh` retains selected
 directories and package paths in parallel arrays, with separate source IDs.
 `enumerate_source_entries PACKAGE` emits a raw NUL-delimited inventory including
 directories and symlinks, without following directory symlinks. Ignore filtering,
-entry validation and winner resolution are implemented by the phase-2 Perl
-planner. This raw inventory interface remains available for lower-level tooling.
+entry validation and winner resolution are implemented by the Perl planner. This raw inventory interface remains available for lower-level tooling.
 
 `bin/stow_bridge.sh` probes the configured Stow executable's own Perl interpreter
 and module setup, without guessing a Perl-version directory. The read-only probe
 checks CLI/module versions and returns JSON containing executable, interpreter,
-module and version. Absolute Perl shebangs and `/usr/bin/env perl` are supported;
-other interpreter forms fail with a diagnostic. The configured default remains
+module and version. A shebang of exactly `#!/usr/bin/env perl`, or an absolute path ending in
+`/perl` without arguments, is supported; other interpreter forms, such as
+`#!/usr/bin/perl -w`, fail with a diagnostic. The configured default remains
 `/opt/stow-${STOW_VERSION:-2.4.1}/bin/stow`.
 
 Stack dispatch accepts `listdirs`, `plan`, `explain TARGET`, `ls`,

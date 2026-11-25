@@ -11,7 +11,7 @@ metadata. For operator steps, see the [migration how-to](migrate_overlay.md).
 `execstow stow|restow|delete`, `del`, `migrate --from ID` and explicit utility
 destinations are available. There is no public bare `apply` alias.
 The Perl backend exposes `apply`, `preview`, `migrate`, `inspect_applied`,
-`delete_applied` and `recover`; isolated tests also call those APIs through a driver
+`preview_delete`, `delete_applied`, `recover` and `writer_guard`; isolated tests also call those APIs through a driver
 that refuses a home outside its own marked `envmaker-state.*` temporary tree.
 It is not an operator apply command. API roles are checked: an inspect object
 cannot mutate through apply, deletion or recovery.
@@ -60,7 +60,7 @@ envmaker commands inherit its descriptor; each re-entry verifies flock, inode
 and ownership rather than trusting an environment flag. Inheritance is enabled
 only in the intended child after fork, preserving the parent's descriptor flags.
 The parent keeps the lock until the command exits.
-Hooks, discovery rules and fallback commands use a child-local execution boundary
+Hooks, discovery rules and the `hostname` selector use a child-local execution boundary
 that removes `DFT_GUARD_FD` and closes the inherited lock descriptors. Shell
 callers share a Bash subshell helper, preserving shell functions, builtins and
 Bash execution of scripts without a shebang. Perl stack hooks close both the
@@ -90,7 +90,7 @@ paths needed to run dotfiletracker are rejected before state creation.
 ```text
 dotfiletracker/
   applied.json
-  pending.json
+  pending.json          # only while an operation is unfinished
   stow/generation_<32 lowercase hex digits>/
     .stow-local-ignore
     <relative target> -> relative path to original winning source entry
@@ -99,8 +99,10 @@ dotfiletracker/
     intent.json
     <run number>.stdout.log
     <run number>.stderr.log
-    completed.json
+    completed.json      # the archived pending.json
 ```
+
+`<run number>` counts the Stow runs of one operation from 0.
 
 Generated directories are real directories; file entries are relative symlinks
 to original source entries, preserving live edits and original source symlinks.
@@ -144,7 +146,7 @@ uses automatic CLI resource-file parsing.
 After simulation, the backend rechecks generated inventory, source membership
 and home ownership, journals the real command, and executes the same combined
 transition. A launch barrier records the child's PID and command before that
-child can modify home. Stdin is closed; separate stdout/stderr logs, start/finish
+child can modify home. Stdin is redirected from `/dev/null`; separate stdout/stderr logs, start/finish
 times, decoded exit status and raw wait status are retained. Failed runs remain
 failed, retain the pending journal, and never invoke hooks.
 
@@ -163,9 +165,9 @@ Deletion uses the retained applied manifest, works with unavailable checkouts,
 and leaves an empty applied receipt. Old/new generations and logs are retained.
 A receipt records the directory identities of its active targets. After deleting
 a generation, those identities are released so another migration can unfold a
-restored legacy link. Older receipts may contain identities for retired targets.
-Active target ancestors and directories recorded by a pending operation are still
-checked.
+restored legacy link. Ancestor identities that older receipts recorded for
+retired targets are ignored: only ancestors of the receipt's active targets and
+the `parents_before` directories of a pending operation are checked.
 
 ## Recovery commands
 
@@ -182,8 +184,10 @@ state directory; a mismatch fails with the actual owning location.
 `inspect` is read-only and prints the recorded operation as JSON. It can read
 the durable intent when pending publication never completed, or the completed
 record when publication succeeded but ownership-marker finalization did not.
-It does not need a Stow installation or source discovery. Use it for a read-only
-recovery report; `--dry-run recover resume|restore` is rejected without mutation.
+It does not need a Stow installation or source discovery. When the lock file
+exists, `inspect` takes a shared lock, so it fails with "Target lock is held by
+another operation" while a writer runs; it creates nothing when the lock file
+is missing. Use it for a read-only recovery report; `--dry-run recover resume|restore` is rejected without mutation.
 
 `resume` finishes the recorded new generation. An unfinished build is resumed
 only through matching generated entries and validated recorded source inputs.
@@ -193,7 +197,7 @@ home links until the original checkouts return. Unexpected generated metadata
 or replacement home entries cause refusal rather than adoption or overwriting.
 
 Recovery also accepts receipts from versions that incorrectly recorded shortest
-home paths for `.local` targets. It recognizes only that exact previous encoding
+home paths (with the default state directory: targets under `.local`). It recognizes only that exact previous encoding
 of the same recorded generation and still requires the actual home link to
 have Stow's literal text. Successful recovery publishes corrected receipt text.
 A shortened replacement home link is preserved as a conflict even when it
@@ -204,6 +208,10 @@ only the recorded old/new link texts. One simulation deletes both possible
 generation inventories and installs the requested generation; the same combined
 operation is then applied, verified and published. Partial links and the
 “Stow completed, applied state not published” case are reconciled explicitly.
+For an interrupted migration, recovery first removes recorded legacy links that
+are still present, then unstows the new generation in a separate
+simulate-then-apply step. Only then does `resume` run the normal transition or
+`restore` re-create the original links.
 No failed apply is automatically rerun. Recovery retains operation evidence and
 does not delete a generation, clear a live lock or signal a process.
 
@@ -224,11 +232,14 @@ does not delete a generation, clear a live lock or signal a process.
 
 Successful checkpoints are `validated`, `built`, `simulated`, `stow-complete`,
 `verified` and `published`. Running/failure phases include `building`,
-`simulating`, `applying`, `simulation-failed` and `stow-failed`. A nonzero Stow
+`simulating`, `applying`, `simulation-failed` and `stow-failed`. Migration adds
+`migration-unlinking` and `migration-unlinked`, and recovery of a migration adds
+`migration-reconciling`. A nonzero Stow
 run never advances the last completed checkpoint to success.
 
 An applied receipt records `generation` (or null), `target_root`, `state_dir`,
-the canonical manifest digest, literal home `links`, and verified `ancestors`.
+the canonical manifest digest `manifest_sha256`, literal home `links`, and the
+verified `ancestors` of its active targets.
 Generation manifests retain the plan plus their generation identity. A receipt
 or manifest mismatch fails closed. Intent and completion records bridge crashes
 between atomic metadata publications; they are not user-editable configuration.
@@ -245,10 +256,10 @@ paths, replaced targets/ancestors, actual Stow conflict logs, durable intent,
 resume/restore across injected build/transition/verification/publication failures
 and a hard process stop after Stow. Shared-guard tests exercise every legacy
 writer, explicit overrides and alternate state directories. A pipe-barrier lock
-fixture includes a removed-guard negative control and is repeated pinned to one
-CPU in both orders. Descriptive subtest names may be supplied to run a selection.
+fixture includes a removed-guard negative control. Setting `DFT_TEST_REVERSE=1`
+runs the order-sensitive cases in reverse order. Descriptive subtest names may be supplied to run a selection.
 External-boundary cases cross stack/legacy and nested entry with hooks, rules
-and fallback commands. FIFO readiness/release handshakes prove synchronous
+and the `hostname` selector. FIFO readiness/release handshakes prove synchronous
 exclusion and immediate reuse while detached descendants remain alive. An old
 leak negative control retains both the original and verified descriptors. A
 separate case retains the lock in an internal mutator after its parent exits.
@@ -265,13 +276,17 @@ before unlinking. Execution builds the generation first, unlinks those verified
 legacy links, then simulates and applies the generation. A failure after unlink
 leaves an explicit recovery task: resume completes the generation; restore
 unstows recorded generated links and reinstates exact original links. Original
-links can be restored without source checkouts. The temporary unlink gap is
+links can be restored without source checkouts. Migration and its preview are
+refused when the target already has an applied stack generation or an
+unfinished operation. The temporary unlink gap is
 not an atomic switch. No automatic rollback hides a failed command.
 
 `inspect_applied` reports each recorded owner and literal-link ownership,
 including deep or dangling links without source discovery. `preview_delete`
-checks the recorded inventory without modifying it. Source hooks run after
-publication, low-to-high source priority and lexical filename order. The hook
+checks the recorded inventory without modifying it. Source hooks run after a
+successful `execstow stow|restow` (also after a verified link no-op, which
+publishes nothing) and after a successful `migrate` (with action `stow`), in
+low-to-high source priority and lexical filename order. The hook
 receives the Stow action, `DOTFILES_DIR` and `DOTFILETRACKER_SOURCE_ID`.
 Duplicate hook basenames run in both sources; failures only warn. Previews,
 deletion, recovery and failed applications do not run hooks.

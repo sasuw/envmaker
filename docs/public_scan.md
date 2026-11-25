@@ -1,6 +1,6 @@
 # Public scan policy reference
 
-Contributors run `python3 -I scripts/scan_public.py --root .` before a commit.
+Run `python3 -I scripts/scan_public.py --root .` before a commit.
 The gate checks filenames, hidden files, UTF-8 text files and symlink text
 and runs gitleaks 8.16.0. Scanner failures, missing reports, unsupported binaries
 and findings fail the gate. Only safe rule IDs,
@@ -39,11 +39,12 @@ publication approval. Release review must separately scan the proposed public
 history, identities and refs before publication. No private release inventory
 or receipt belongs in this repository.
 
-To run the retained checks locally, a contributor provides the Stow 2.4.1
+To run the retained checks locally, provide the Stow 2.4.1
 executable/module pair from `docs/prerequisites.md` and these commands on `PATH`:
 
 - Interpreters and lint: `bash`, `sh`, `zsh`, `perl`, `python3`, `shellcheck`.
-- Text and traversal: `awk`, `grep`, `sed`, `find`, `xargs`, `cmp`, `tail`.
+- Text and traversal: `awk`, `grep`, `sed`, `find`, `xargs`, `cmp`, `tail`,
+  `tr`, `wc`.
 - Files and paths: `basename`, `cat`, `chmod`, `cp`, `dirname`, `ln`, `mkdir`,
   `mktemp`, `mv`, `readlink`, `rm`, `rmdir`, `stat`.
 - Runtime context and helpers: `env`, `git`, `hostname`, `tput`, `true`, `uname`.
@@ -62,12 +63,13 @@ On the disposable Ubuntu 24.04 CI runner, the workflow explicitly installs
 `git`, `grep`, `gzip`, `hostname`, `make`, `mawk`, `ncurses-bin`, `perl`,
 `python3`, `sed`, `shellcheck`, `tar` and `zsh`. `dash` supplies `sh`, `mawk`
 supplies `awk`, `diffutils` supplies `cmp`, and `ncurses-bin` supplies `tput`.
-`coreutils` supplies the file/path commands, `tail`, `env`, `true` and `uname`;
+`coreutils` supplies the file/path commands, `tail`, `tr`, `wc`, `env`, `true`
+and `uname`;
 `findutils` supplies `find` and `xargs`. Go comes from the hosted runner image.
 `curl`, `ca-certificates`, `tar`, `gzip` and `make` support CI prerequisite
 setup; local checks do not download or build prerequisites.
 
-A contributor then runs:
+Then run:
 
 ```bash
 python3 -I scripts/scan_public.py --root .
